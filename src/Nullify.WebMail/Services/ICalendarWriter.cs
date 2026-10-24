@@ -170,21 +170,54 @@ public static partial class ICalendarWriter
     /// <summary>A VTIMEZONE describing the zone's rule in effect for <paramref name="year"/>.</summary>
     public static List<string> VTimezone(TimeZoneInfo zone, string tzid, int year)
     {
-        var rule = zone.GetAdjustmentRules().FirstOrDefault(r => r.DateStart.Year <= year && r.DateEnd.Year >= year);
-        var std = zone.BaseUtcOffset + (rule?.BaseUtcOffsetDelta ?? TimeSpan.Zero);
+        // Derived from the zone's actual offset changes rather than GetAdjustmentRules(): on Linux the
+        // rules come from tzdata as per-year fixed-date (or zero-delta) entries, unlike Windows' floating ones.
+        var transitions = Transitions(zone, year);
+        var toDst = transitions.FirstOrDefault(t => t.Dst);
+        var toStd = transitions.FirstOrDefault(t => !t.Dst);
         var lines = new List<string> { "BEGIN:VTIMEZONE", "TZID:" + tzid };
-        if (rule == null || rule.DaylightDelta == TimeSpan.Zero)
+        if (toDst == default || toStd == default)
         {
+            var std = zone.GetUtcOffset(new DateTimeOffset(year, 12, 31, 12, 0, 0, TimeSpan.Zero));
             lines.AddRange(["BEGIN:STANDARD", "DTSTART:19700101T000000", "TZOFFSETFROM:" + Offset(std), "TZOFFSETTO:" + Offset(std), "END:STANDARD"]);
         }
         else
         {
-            var dst = std + rule.DaylightDelta;
-            lines.AddRange(Observance("DAYLIGHT", rule.DaylightTransitionStart, std, dst));
-            lines.AddRange(Observance("STANDARD", rule.DaylightTransitionEnd, dst, std));
+            lines.AddRange(Observance("DAYLIGHT", FloatingRule(toDst.LocalBefore), toDst.From, toDst.To));
+            lines.AddRange(Observance("STANDARD", FloatingRule(toStd.LocalBefore), toStd.From, toStd.To));
         }
         lines.Add("END:VTIMEZONE");
         return lines;
+    }
+
+    private readonly record struct OffsetChange(DateTime LocalBefore, TimeSpan From, TimeSpan To, bool Dst);
+
+    /// <summary>Each UTC offset change in <paramref name="year"/>, located to the minute.</summary>
+    private static List<OffsetChange> Transitions(TimeZoneInfo zone, int year)
+    {
+        var result = new List<OffsetChange>();
+        var day = new DateTimeOffset(year, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        for (; day.Year == year; day = day.AddDays(1))
+        {
+            var from = zone.GetUtcOffset(day);
+            if (zone.GetUtcOffset(day.AddDays(1)) == from) continue;
+            DateTimeOffset lo = day, hi = day.AddDays(1); // offset(lo) == from, offset(hi) != from
+            while (hi - lo > TimeSpan.FromMinutes(1))
+            {
+                var mid = lo + (hi - lo) / 2;
+                if (zone.GetUtcOffset(mid) == from) lo = mid; else hi = mid;
+            }
+            var at = new DateTimeOffset(hi.UtcTicks - hi.UtcTicks % TimeSpan.TicksPerMinute, TimeSpan.Zero);
+            result.Add(new OffsetChange(at.UtcDateTime + from, from, zone.GetUtcOffset(at), zone.IsDaylightSavingTime(at)));
+        }
+        return result;
+    }
+
+    /// <summary>The "nth/last weekday of the month" rule matching a transition's local date.</summary>
+    private static TimeZoneInfo.TransitionTime FloatingRule(DateTime local)
+    {
+        var week = local.Day + 7 > DateTime.DaysInMonth(local.Year, local.Month) ? 5 : (local.Day - 1) / 7 + 1;
+        return TimeZoneInfo.TransitionTime.CreateFloatingDateRule(new DateTime(1, 1, 1, local.Hour, local.Minute, 0), local.Month, week, local.DayOfWeek);
     }
 
     private static IEnumerable<string> Observance(string kind, TimeZoneInfo.TransitionTime t, TimeSpan from, TimeSpan to)
