@@ -26,8 +26,9 @@ public sealed class SmtpClient(ILogger<SmtpClient> logger)
             if (endpoint.Security == MailSecurity.Tls)
                 stream = await UpgradeTlsAsync(stream, endpoint, cts.Token);
 
+            // Readers and writers leave the stream open: STARTTLS replaces them while the socket must survive.
             var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
-            var writer = new StreamWriter(stream, new UTF8Encoding(false)) { NewLine = "\r\n", AutoFlush = true };
+            var writer = NewWriter(stream);
 
             try
             {
@@ -45,7 +46,7 @@ public sealed class SmtpClient(ILogger<SmtpClient> logger)
                     await writer.DisposeAsync();
                     stream = ssl;
                     reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
-                    writer = new StreamWriter(stream, new UTF8Encoding(false)) { NewLine = "\r\n", AutoFlush = true };
+                    writer = NewWriter(stream);
                     await SendCommandAsync(writer, reader, $"EHLO {Dns.GetHostName()}", cts.Token, "250");
                 }
 
@@ -76,6 +77,7 @@ public sealed class SmtpClient(ILogger<SmtpClient> logger)
             {
                 reader.Dispose();
                 await writer.DisposeAsync();
+                await stream.DisposeAsync();
             }
         }
         catch (SmtpException)
@@ -96,6 +98,9 @@ public sealed class SmtpClient(ILogger<SmtpClient> logger)
         if (lt >= 0 && gt > lt) return value[(lt + 1)..gt].Trim();
         return value.Trim();
     }
+
+    private static StreamWriter NewWriter(Stream stream) =>
+        new(stream, new UTF8Encoding(false), bufferSize: -1, leaveOpen: true) { NewLine = "\r\n", AutoFlush = true };
 
     private static string FirstLine(string response) =>
         response.Split('\n')[0].Trim();
