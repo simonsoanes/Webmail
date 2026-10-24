@@ -3,14 +3,14 @@
 #
 # Secrets:
 #   GITEADOCKERTOKEN          Gitea access token with package write for user "simon" (registry login).
-#   WEBMAIL_PORTAINER_WEBHOOK Optional Portainer stack/service webhook URL; when set, main and tag builds redeploy.
+#   WEBMAIL_PORTAINER_WEBHOOK Optional Portainer stack/service webhook URL; when set, master and tag builds redeploy.
 #
-# Tags: every build pushes :<commit sha>; main pushes :latest; a v1.2.3 tag pushes :1.2.3, :1.2 and :latest.
+# Tags: every build pushes :<commit sha>; master pushes :latest; a v1.2.3 tag pushes :1.2.3, :1.2 and :latest.
 name: WebMail CI/CD
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags: ["v*"]
     paths-ignore:
       - "docs/**"
@@ -85,7 +85,7 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           docker push "$IMAGE:${{ github.sha }}"
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          if [ "${{ github.ref }}" = "refs/heads/master" ]; then
             docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
             docker push "$IMAGE:latest"
           fi
@@ -98,7 +98,7 @@ jobs:
           fi
 
       - name: Deploy
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || github.ref_type == 'tag')
         env:
           WEBHOOK: ${{ secrets.WEBMAIL_PORTAINER_WEBHOOK }}
         run: |
