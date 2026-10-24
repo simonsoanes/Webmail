@@ -159,11 +159,41 @@ Message List, and Preview/Compose.
 
 ### Message preview isolation
 
-HTML messages are rendered in a **sandboxed `<iframe srcdoc="…">`** with the
-`sandbox` attribute (no `allow-same-origin`).  This prevents any JavaScript
-in the email from accessing the parent page.  Images and external resources
-are proxied through the server.  The iframe communicates size changes via
-`postMessage`.
+HTML messages are not sanitised; they are rendered as-is in a **sandboxed
+`<iframe srcdoc="…">`** (`MessagePreview.razor`, `BuildFrameDoc`) with:
+
+```
+sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+```
+
+Two independent layers keep script out, and each blocks it on its own:
+
+- **No `allow-scripts`**: inline scripts, event handlers, `javascript:` URLs
+  and nested frames (which inherit the sandbox) never run.  No `allow-forms`
+  either, so forms cannot submit; no `allow-top-navigation`, so the message
+  cannot navigate the app away.
+- **A CSP `<meta>` in the frame's `<head>`**: `default-src 'none'` blocks
+  scripts, plugins (`object`/`embed`) and frames, and stops `javascript:`
+  links even in a popup.  Remote images, CSS, fonts and media are blocked
+  until the user clicks to allow them; that relaxes only those directives
+  and loads them directly from the sender's servers (they are not proxied).
+  A CSP `<meta>` in the message body is ignored, so a message cannot loosen
+  it.
+
+**Why `allow-same-origin` is there:** the parent page sizes the frame to
+its content by reading `frame.contentDocument` (`nullifyApp.fitFrame` in
+`app.js`), which needs same-origin access; without scripts in the frame
+there is no way for it to report its own height.  The cost is that the
+frame shares the app's origin, so **`allow-scripts` must never be added**:
+together with `allow-same-origin` it would let any message escape the
+sandbox and reach the session, storage and in-browser PGP keys, leaving
+the CSP as the only barrier.
+
+`allow-popups` and `allow-popups-to-escape-sandbox` let links open in a
+new tab (`<base target="_blank">`) as normal, unsandboxed pages.  Links get
+the browser's implicit `noopener`, and `<meta name="referrer"
+content="no-referrer">` plus `referrerpolicy="no-referrer"` keep the
+webmail URL out of the Referer header.
 
 ### OpenPGP
 
