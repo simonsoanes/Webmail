@@ -1,0 +1,534 @@
+@using Nullify.WebMail.Services
+@inject ApiService Api
+@inject AppState State
+@inject IJSRuntime JS
+@inject CalDavAccountService Dav
+@inject PgpService PgpStore
+@inject PgpBrowser Pgp
+@implements IDisposable
+
+<div class="compose-form">
+    <div class="compose-head">
+        <h2>@Title</h2>
+        <span class="spacer"></span>
+        <button class="icon-btn" @onclick="Close" title="Close"><Icon Name="x" /></button>
+    </div>
+
+    @if (loading)
+    {
+        <div class="empty-state"><span class="spinner"></span><p>Preparing message…</p></div>
+    }
+    else
+    {
+        <div class="compose-fields">
+            <div class="compose-field">
+                <label>From</label>
+                <span class="from-value">@from</span>
+            </div>
+            <div class="compose-field">
+                <label for="compose-to">To</label>
+                <RecipientInput @ref="toInput" Id="compose-to" @bind-Value="to" Candidates="candidates" OnFirstFocus="LoadCandidates"
+                                Placeholder="Name or email; separate several with commas" />
+                <span class="toggles">
+                    @if (!showCc) { <button @onclick="() => showCc = true">Cc</button> }
+                    @if (!showBcc) { <button @onclick="() => showBcc = true">Bcc</button> }
+                </span>
+            </div>
+            @if (showCc)
+            {
+                <div class="compose-field">
+                    <label for="compose-cc">Cc</label>
+                    <RecipientInput Id="compose-cc" @bind-Value="cc" Candidates="candidates" OnFirstFocus="LoadCandidates" />
+                </div>
+            }
+            @if (showBcc)
+            {
+                <div class="compose-field">
+                    <label for="compose-bcc">Bcc</label>
+                    <RecipientInput Id="compose-bcc" @bind-Value="bcc" Candidates="candidates" OnFirstFocus="LoadCandidates" />
+                </div>
+            }
+            <div class="compose-field compose-subject">
+                <label for="compose-subject">Subject</label>
+                <input id="compose-subject" @bind="subject" @bind:event="oninput" type="text" />
+            </div>
+        </div>
+
+        <div class="compose-editor">
+            <textarea @ref="bodyInput" class="@(State.ComposeFont == "monospace" ? "mono" : "")"
+                      @bind="body" @bind:event="oninput" placeholder="Write your message…" aria-label="Message body"></textarea>
+        </div>
+
+        @if (attachments.Count > 0)
+        {
+            <div class="compose-attachments">
+                @foreach (var att in attachments)
+                {
+                    var a = att;
+                    <span class="chip" title="@a.Filename">
+                        <Icon Name="paperclip" Size="13" />
+                        <span>@a.Filename</span>
+                        <span class="muted">@MailFormat.Size(a.Data.LongLength)</span>
+                        <button @onclick="() => attachments.Remove(a)" title="Remove"><Icon Name="x" Size="12" /></button>
+                    </span>
+                }
+            </div>
+        }
+
+        @if (myKey != null && (sign || EncryptOn))
+        {
+            var missing = MissingKeys();
+            <div class="pgp-status @(EncryptOn && missing.Count > 0 ? "warn" : "")">
+                <Icon Name="@(EncryptOn ? "lock" : "pen")" Size="13" />
+                @if (EncryptOn && missing.Count > 0)
+                {
+                    <span>Can't encrypt: no OpenPGP key for @string.Join(", ", missing). Add it to their contact, or turn off Encrypt.</span>
+                }
+                else
+                {
+                    <span>@(EncryptOn ? "Encrypted end to end" : "Not encrypted")@(sign ? $", signed as {myKey.UserId}" : "").</span>
+                }
+            </div>
+        }
+
+        @if (!string.IsNullOrEmpty(error))
+        {
+            <div style="padding:0 1.25rem;"><div class="alert err"><Icon Name="alert" Size="15" /><div>@error</div></div></div>
+        }
+
+        <div class="compose-actions">
+            <button class="btn accent" @onclick="Send" disabled="@(sending || attaching)">
+                @if (sending) { <span class="spinner"></span> <span>Sending…</span> }
+                else { <Icon Name="send" Size="15" /> <span>Send</span> }
+            </button>
+            <label class="btn ghost icon file-picker" title="Attach files">
+                @if (attaching) { <span class="spinner"></span> } else { <Icon Name="paperclip" /> }
+                <InputFile OnChange="OnFiles" multiple />
+            </label>
+            @if (myKey != null)
+            {
+                <span class="compose-pgp">
+                    <button class="toggle-btn @(sign ? "on" : "")" @onclick="() => sign = !sign" aria-pressed="@sign"
+                            title="Sign with your OpenPGP key"><Icon Name="pen" Size="14" /> Sign</button>
+                    <button class="toggle-btn @(EncryptOn ? "on" : "")" @onclick="ToggleEncrypt" aria-pressed="@EncryptOn"
+                            title="Encrypt for the recipients' OpenPGP keys"><Icon Name="lock" Size="14" /> Encrypt</button>
+                </span>
+            }
+            <span class="hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> to send</span>
+            <span class="spacer"></span>
+            <button class="btn ghost small" @onclick="SaveDraft" disabled="@sending">Save draft</button>
+            <button class="icon-btn" @onclick="Discard" title="Discard"><Icon Name="trash" /></button>
+        </div>
+    }
+</div>
+
+@if (unlockFor != null)
+{
+    <PgpUnlockDialog Key="unlockFor" Reason="Unlock your key to sign this message." OnUnlocked="AfterUnlock" OnCancel="() => { unlockFor = null; resumeSend = false; }" />
+}
+
+@code {
+    private const long MaxAttachmentBytes = 25 * 1024 * 1024;
+
+    private string from = "";
+    private string to = "", cc = "", bcc = "", subject = "", body = "";
+    private string initialBody = "";
+    private bool showCc, showBcc;
+    private string? inReplyTo, references;
+    private readonly List<OutgoingAttachment> attachments = new();
+    private string? error;
+    private bool sending, attaching, loading = true;
+    private RecipientInput? toInput;
+    private ElementReference bodyInput;
+    private IReadOnlyList<RecipientCandidate>? candidates;
+    private bool candidatesRequested;
+    private bool focusPending;
+
+    // OpenPGP
+    private PgpKeyRecord? myKey;
+    private PgpKeyInfo? myKeyInfo;
+    private PgpSettingsDto pgpSettings = new(false, true);
+    private readonly Dictionary<string, string> recipientKeys = new(StringComparer.OrdinalIgnoreCase);
+    private bool sign, encryptTouched, encryptChoice, resumeSend;
+    private PgpKeyRecord? unlockFor;
+
+    /// <summary>Encrypt unless the user switched it off; on by default when every recipient has a key.</summary>
+    private bool EncryptOn => myKey != null && (encryptTouched ? encryptChoice
+        : pgpSettings.EncryptWhenPossible && RecipientEmails().Count > 0 && MissingKeys().Count == 0);
+
+    private void ToggleEncrypt()
+    {
+        encryptChoice = !EncryptOn;
+        encryptTouched = true;
+    }
+
+    private List<string> RecipientEmails() =>
+        SplitRecipients(to).Concat(showCc ? SplitRecipients(cc) : []).Concat(showBcc ? SplitRecipients(bcc) : [])
+            .Select(MailService.ExtractAddress).Where(a => a.Contains('@')).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+    private List<string> MissingKeys() => RecipientEmails().Where(e => !recipientKeys.ContainsKey(e)).ToList();
+
+    /// <summary>Load the user's key and the recipients' keys (from contacts) once.</summary>
+    private async Task InitPgp()
+    {
+        try
+        {
+            var mine = await PgpStore.ListAsync();
+            myKey = mine.FirstOrDefault(k => k.IsDefault) ?? mine.FirstOrDefault();
+            if (myKey == null) return;
+            pgpSettings = await PgpStore.GetSettingsAsync();
+            sign = pgpSettings.SignByDefault;
+            foreach (var k in mine)
+                foreach (var email in (await Pgp.InspectAsync(k.PublicKey)).SelectMany(i => i.Emails))
+                    recipientKeys.TryAdd(email, k.PublicKey);
+            myKeyInfo = (await Pgp.InspectAsync(myKey.PublicKey)).FirstOrDefault();
+            var contacts = await Dav.GetContactsAsync();
+            if (contacts != null)
+            {
+                candidates ??= RecipientSuggester.FromContacts(contacts.Contacts);
+                foreach (var c in contacts.Contacts.Where(c => c.PublicKey != null))
+                    foreach (var e in c.Emails) recipientKeys.TryAdd(e.Value, c.PublicKey!);
+            }
+        }
+        catch (Exception ex) when (ex is PgpException or CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            // OpenPGP is optional; compose still works without it.
+        }
+    }
+
+    /// <summary>RFC 3156 micalg for the signing key's hash.</summary>
+    private string Micalg => myKeyInfo?.Algorithm switch
+    {
+        { } a when a.Contains("P-521") => "pgp-sha512",
+        { } a when a.Contains("P-384") => "pgp-sha384",
+        _ => "pgp-sha256",
+    };
+
+    /// <summary>Wrap the body in PGP/MIME when signing or encrypting; null when neither.</summary>
+    private async Task<string?> ProtectAsync(SendRequest req)
+    {
+        if (myKey == null || (!sign && !EncryptOn)) return null;
+        var entity = MailService.BuildBodyEntity(req);
+        var bytes = System.Text.Encoding.UTF8.GetBytes(entity);
+        if (EncryptOn)
+        {
+            var keys = RecipientEmails().Select(e => recipientKeys[e]).Append(myKey.PublicKey).Distinct().ToList();
+            var armored = await Pgp.EncryptAsync(bytes, keys, sign ? myKey.Fingerprint : null);
+            return MailService.PgpEncryptedEntity(armored);
+        }
+        // RFC 3156: the CRLF before the boundary isn't part of the signed content.
+        var signed = entity.TrimEnd('\r', '\n');
+        var signature = await Pgp.SignDetachedAsync(System.Text.Encoding.UTF8.GetBytes(signed), myKey.Fingerprint);
+        return MailService.PgpSignedEntity(signed, signature, Micalg);
+    }
+
+    private async Task AfterUnlock()
+    {
+        unlockFor = null;
+        if (resumeSend) await Send(); // Send clears resumeSend once it gets past the checks
+    }
+
+    private string Title => State.ComposeMode switch
+    {
+        ComposeMode.Reply => "Reply",
+        ComposeMode.ReplyAll => "Reply all",
+        ComposeMode.Forward => "Forward",
+        _ => "New message",
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        State.SendHandler = Send;
+        from = State.Session?.Email ?? State.Session?.Username ?? "";
+        var signature = string.IsNullOrWhiteSpace(State.Signature) ? "" : "\n\n-- \n" + State.Signature.TrimEnd();
+
+        if (State.ComposeMode != ComposeMode.New && State.ComposeSourceFolder != null && State.ComposeSourceUid is { } uid)
+        {
+            try
+            {
+                var msg = await Api.GetMessageAsync(State.ComposeSourceFolder, uid);
+                if (msg != null) await Prefill(msg, uid, signature);
+            }
+            catch (Exception ex)
+            {
+                error = $"Could not load the original message: {ex.InnerException?.Message ?? ex.Message}";
+            }
+        }
+        else
+        {
+            body = signature;
+            to = State.ComposeTo ?? "";
+            State.ComposeTo = null;
+        }
+
+        initialBody = body;
+        await InitPgp();
+        loading = false;
+        focusPending = true;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!focusPending || loading) return;
+        focusPending = false;
+        try
+        {
+            // Replies start in the body; new messages and forwards need recipients first.
+            // Replies (and messages addressed from Contacts) start in the body; others need recipients first.
+            if (State.ComposeMode is ComposeMode.Reply or ComposeMode.ReplyAll) await JS.InvokeVoidAsync("nullifyApp.focusStart", bodyInput);
+            else if (to.Length > 0) await JS.InvokeVoidAsync("nullifyApp.focus", "#compose-subject");
+            else if (toInput != null) await toInput.FocusAsync();
+        }
+        catch { /* element not ready */ }
+    }
+
+    private async Task Prefill(MessageContent msg, long uid, string signature)
+    {
+        string H(string name) => msg.Headers != null && msg.Headers.TryGetValue(name, out var v) ? v : "";
+        var origSubject = H("Subject");
+        var sender = MailFormat.ParseAddress(H("From"));
+        var date = MailFormat.FullDate(H("Date"), State.TimeZone);
+        var text = !string.IsNullOrWhiteSpace(msg.TextBody) ? msg.TextBody
+            : msg.HtmlBody != null ? MailFormat.HtmlToText(msg.HtmlBody) : "";
+        text = text.TrimEnd();
+
+        if (State.ComposeMode == ComposeMode.Forward)
+        {
+            subject = HasPrefix(origSubject, "fwd:", "fw:") ? origSubject : "Fwd: " + origSubject;
+            body = signature + "\n\n---------- Forwarded message ----------\n" +
+                   $"From: {H("From")}\nDate: {date}\nSubject: {origSubject}\nTo: {H("To")}\n" +
+                   (H("Cc").Length > 0 ? $"Cc: {H("Cc")}\n" : "") + "\n" + text;
+            await ForwardAttachments(msg, uid);
+            return;
+        }
+
+        subject = HasPrefix(origSubject, "re:") ? origSubject : "Re: " + origSubject;
+        var replyTo = H("Reply-To");
+        to = replyTo.Length > 0 ? replyTo : H("From");
+
+        if (State.ComposeMode == ComposeMode.ReplyAll)
+        {
+            var me = MailFormat.ParseAddress(from).Email;
+            var primary = MailFormat.ParseAddressList(to).Select(a => a.Email).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var others = MailFormat.ParseAddressList(H("To")).Concat(MailFormat.ParseAddressList(H("Cc")))
+                .Where(a => !a.Email.Equals(me, StringComparison.OrdinalIgnoreCase) && !primary.Contains(a.Email))
+                .DistinctBy(a => a.Email.ToLowerInvariant())
+                .Select(a => a.ToString()).ToList();
+            if (others.Count > 0)
+            {
+                cc = string.Join(", ", others);
+                showCc = true;
+            }
+        }
+
+        var messageId = H("Message-ID");
+        if (messageId.Length > 0)
+        {
+            inReplyTo = messageId;
+            references = (H("References") + " " + messageId).Trim();
+        }
+
+        var quoted = string.Join("\n", text.Split('\n').Select(l => l.StartsWith('>') ? ">" + l : "> " + l));
+        body = signature + $"\n\nOn {date}, {sender.Display} wrote:\n{quoted}";
+    }
+
+    private async Task ForwardAttachments(MessageContent msg, long uid)
+    {
+        foreach (var info in (msg.Attachments ?? []).Where(a => !a.IsInline))
+        {
+            try
+            {
+                var att = await Api.GetAttachmentAsync(State.ComposeSourceFolder!, uid, info.PartId);
+                if (att != null) attachments.Add(new OutgoingAttachment(att.Filename, att.ContentType, att.Data));
+            }
+            catch (Exception ex)
+            {
+                error = $"Could not include attachment {info.Filename}: {ex.InnerException?.Message ?? ex.Message}";
+            }
+        }
+    }
+
+    /// <summary>Load address-book entries once, on first focus of a recipient field. No CardDAV → no suggestions.</summary>
+    private async Task LoadCandidates()
+    {
+        if (candidatesRequested) return;
+        candidatesRequested = true;
+        try
+        {
+            var list = await Dav.GetContactsAsync();
+            if (list != null) candidates = RecipientSuggester.FromContacts(list.Contacts);
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            // Suggestions are a convenience; typing addresses still works.
+        }
+    }
+
+    private static bool HasPrefix(string s, params string[] prefixes) =>
+        prefixes.Any(p => s.TrimStart().StartsWith(p, StringComparison.OrdinalIgnoreCase));
+
+    private async Task OnFiles(InputFileChangeEventArgs e)
+    {
+        attaching = true;
+        error = null;
+        try
+        {
+            foreach (var file in e.GetMultipleFiles(20))
+            {
+                var used = attachments.Sum(a => a.Data.LongLength);
+                if (used + file.Size > MaxAttachmentBytes)
+                {
+                    error = $"\"{file.Name}\" would exceed the {MailFormat.Size(MaxAttachmentBytes)} attachment limit.";
+                    break;
+                }
+                using var ms = new MemoryStream();
+                await file.OpenReadStream(MaxAttachmentBytes).CopyToAsync(ms);
+                attachments.Add(new OutgoingAttachment(file.Name,
+                    string.IsNullOrEmpty(file.ContentType) ? "application/octet-stream" : file.ContentType, ms.ToArray()));
+            }
+        }
+        catch (Exception ex)
+        {
+            error = $"Could not attach file: {ex.Message}";
+        }
+        finally
+        {
+            attaching = false;
+        }
+    }
+
+    private static List<string> SplitRecipients(string value) =>
+        MailFormat.ParseAddressList(value).Select(a => a.ToString()).ToList();
+
+    private SendRequest BuildRequest() => new(
+        from, SplitRecipients(to),
+        showCc ? SplitRecipients(cc) : null,
+        showBcc ? SplitRecipients(bcc) : null,
+        subject, body, null, null, false, false, null,
+        inReplyTo, references, attachments.ToList());
+
+    private async Task Send()
+    {
+        if (sending) return;
+        error = null;
+        var all = SplitRecipients(to).Concat(showCc ? SplitRecipients(cc) : []).Concat(showBcc ? SplitRecipients(bcc) : []).ToList();
+        if (all.Count == 0)
+        {
+            error = "Add at least one recipient.";
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+        var invalid = all.Select(MailService.ExtractAddress).FirstOrDefault(a => !a.Contains('@') || a.Contains(' '));
+        if (invalid != null)
+        {
+            error = $"\"{invalid}\" doesn't look like an email address.";
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+        if (EncryptOn && MissingKeys() is { Count: > 0 } missing)
+        {
+            error = $"No OpenPGP key for {string.Join(", ", missing)}. Add it to their contact, or turn off Encrypt.";
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+        if (!resumeSend && string.IsNullOrWhiteSpace(subject) &&
+            !await JS.InvokeAsync<bool>("nullifyApp.confirm", EncryptOn
+                ? "Send this message without a subject? (Subjects are not encrypted.)"
+                : "Send this message without a subject?"))
+            return;
+        if (myKey != null && sign && !await Pgp.IsUnlockedAsync(myKey.Fingerprint))
+        {
+            unlockFor = myKey;
+            resumeSend = true;
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+        resumeSend = false;
+
+        sending = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var request = BuildRequest();
+            await Api.SendAsync(request, await ProtectAsync(request));
+            if (State.ComposeMode is ComposeMode.Reply or ComposeMode.ReplyAll &&
+                State.ComposeSourceFolder != null && State.ComposeSourceUid is { } uid)
+            {
+                try { await Api.SetFlagsAsync(State.ComposeSourceFolder, uid, "\\Answered", null); }
+                catch { /* cosmetic */ }
+                State.ListVersion++;
+            }
+            State.FoldersVersion++;
+            State.ShowToast("Message sent");
+            CloseNow();
+        }
+        catch (PgpException ex) when (ex.Locked && myKey != null)
+        {
+            unlockFor = myKey;
+            resumeSend = true;
+        }
+        catch (PgpException ex)
+        {
+            error = $"Couldn't sign or encrypt: {ex.Message}";
+        }
+        catch (Exception ex)
+        {
+            error = $"Send failed: {ex.InnerException?.Message ?? ex.Message}";
+        }
+        finally
+        {
+            sending = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task SaveDraft()
+    {
+        try
+        {
+            var folder = await Api.SaveDraftAsync(BuildRequest());
+            if (folder == null)
+            {
+                error = "This mailbox has no Drafts folder.";
+                return;
+            }
+            State.FoldersVersion++;
+            if (State.SelectedFolder == folder) State.ListVersion++;
+            State.ShowToast("Draft saved");
+            CloseNow();
+        }
+        catch (Exception ex)
+        {
+            error = $"Could not save draft: {ex.InnerException?.Message ?? ex.Message}";
+        }
+    }
+
+    private bool IsDirty =>
+        body != initialBody || to.Length > 0 && State.ComposeMode is ComposeMode.New or ComposeMode.Forward
+        || attachments.Count > 0 && State.ComposeMode != ComposeMode.Forward;
+
+    private async Task Discard()
+    {
+        if (IsDirty && !await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard this message?")) return;
+        CloseNow();
+    }
+
+    private async Task Close()
+    {
+        if (IsDirty && !await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard this message?")) return;
+        CloseNow();
+    }
+
+    private void CloseNow()
+    {
+        State.ShowCompose = false;
+        State.ComposeSourceUid = null;
+        State.ComposeSourceFolder = null;
+        State.NotifyStateChanged();
+    }
+
+    public void Dispose()
+    {
+        if (State.SendHandler == Send) State.SendHandler = null;
+    }
+}

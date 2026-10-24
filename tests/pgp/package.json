@@ -1,0 +1,8 @@
+{
+  "name": "nullify-pgp-interop-tests",
+  "private": true,
+  "type": "module",
+  "description": "Interoperability tests for wwwroot/js/pgp against GnuPG and OpenPGP.js (test-only dependency).",
+  "scripts": { "test": "node --test" },
+  "devDependencies": { "openpgp": "6.1.1" }
+}

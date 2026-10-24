@@ -1,0 +1,16 @@
+Nullify.WebMail
+Copyright 2026 Simon Soanes
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It depends on the following third-party components, which are distributed under their own licenses:
+
+- ASP.NET Core, Blazor, Entity Framework Core and Microsoft.Data.Sqlite (Microsoft, MIT License)
+- SQLitePCLRaw (Eric Sink, Apache License 2.0)
+- SQLite (public domain)
+
+The following are used only by the test suites and are not distributed with the product:
+
+- MSTest and Microsoft.AspNetCore.Mvc.Testing (Microsoft, MIT License)
+- OpenPGP.js (Proton AG and contributors, GNU LGPL 3.0 or later), installed by tests/pgp via npm
+- GnuPG (GNU GPL 3.0 or later), invoked as an external program by tests/pgp

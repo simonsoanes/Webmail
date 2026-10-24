@@ -1,0 +1,37 @@
+@using Nullify.WebMail.Services
+@inject AppState State
+
+<span class="menu-anchor">
+    <button class="icon-btn" title="Move to folder" @onclick="() => open = !open" aria-haspopup="menu" aria-expanded="@open">
+        <Icon Name="folder-input" Size="17" />
+    </button>
+    @if (open)
+    {
+        <div class="menu-backdrop" @onclick="() => open = false"></div>
+        <div class="menu @(AlignLeft ? "left" : "")" role="menu">
+            <div class="menu-title">Move to</div>
+            @foreach (var f in MailFormat.OrderFolders(State.Folders).Where(f => f.Name != State.SelectedFolder))
+            {
+                var folder = f;
+                <button class="menu-item" role="menuitem" @onclick="() => Pick(folder.Name)"
+                        style="padding-left:@(0.6 + MailFormat.FolderDepth(folder) * 0.9)rem;">
+                    <Icon Name="@MailFormat.FolderIcon(folder)" Size="16" />
+                    <span>@MailFormat.FolderLeaf(folder)</span>
+                </button>
+            }
+        </div>
+    }
+</span>
+
+@code {
+    [Parameter] public EventCallback<string> OnMove { get; set; }
+    [Parameter] public bool AlignLeft { get; set; }
+
+    private bool open;
+
+    private async Task Pick(string folder)
+    {
+        open = false;
+        await OnMove.InvokeAsync(folder);
+    }
+}

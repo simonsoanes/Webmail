@@ -1,0 +1,17 @@
+bin/
+obj/
+# Runtime data (SQLite database, init lock and data protection keys). The app writes to src/Nullify.WebMail/data,
+# which on Windows is the same folder as the source folder src/Nullify.WebMail/Data/, so ignore files rather than the folder.
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.db.init-lock
+src/Nullify.WebMail/[Dd]ata/keys/
+node_modules/
+.vs/
+.vscode/
+.idea/
+*.user
+TestResults/
+.env

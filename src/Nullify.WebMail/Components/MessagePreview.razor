@@ -1,0 +1,540 @@
+@using Nullify.WebMail.Services
+@inject ApiService Api
+@inject AppState State
+@inject MailActions Actions
+@inject IJSRuntime JS
+@inject PgpService PgpStore
+@inject PgpBrowser Pgp
+@inject CalDavAccountService Dav
+@implements IDisposable
+
+@{
+    var uid = State.SelectedMessageUid;
+    var summary = uid is { } u ? Actions.Find(u) : null;
+}
+
+<div class="pane-toolbar">
+    <button class="icon-btn mobile-only" @onclick="Close" title="Back"><Icon Name="arrow-left" /></button>
+    @if (uid is { } id)
+    {
+        <button class="icon-btn" title="Archive (e)" @onclick="() => Actions.ArchiveAsync([id])"><Icon Name="archive" /></button>
+        <MoveMenu AlignLeft="true" OnMove="dest => Actions.MoveAsync([id], dest)" />
+        <button class="icon-btn" title="Delete (#)" @onclick="() => Actions.DeleteAsync([id])"><Icon Name="trash" /></button>
+        <span class="divider-v"></span>
+        <button class="icon-btn" title="Mark as unread (u)" @onclick="() => Actions.SetSeenAsync([id], false)"><Icon Name="mail" /></button>
+        <button class="icon-btn star @(summary?.IsFlagged == true ? "on" : "")" title="Star (s)" @onclick="() => Actions.ToggleFlaggedAsync(id)">
+            <Icon Name="star" Filled="@(summary?.IsFlagged == true)" />
+        </button>
+        <span class="spacer"></span>
+        <button class="btn ghost small" title="Reply (r)" @onclick="() => Reply(ComposeMode.Reply)"><Icon Name="reply" Size="16" /><span class="hide-sm">Reply</span></button>
+        <button class="btn ghost small" title="Reply all (a)" @onclick="() => Reply(ComposeMode.ReplyAll)"><Icon Name="reply-all" Size="16" /><span class="hide-sm">Reply all</span></button>
+        <button class="btn ghost small" title="Forward (f)" @onclick="() => Reply(ComposeMode.Forward)"><Icon Name="forward" Size="16" /><span class="hide-sm">Forward</span></button>
+        <span class="menu-anchor">
+            <button class="icon-btn" title="More" @onclick="() => moreOpen = !moreOpen"><Icon Name="more" /></button>
+            @if (moreOpen)
+            {
+                <div class="menu-backdrop" @onclick="() => moreOpen = false"></div>
+                <div class="menu" role="menu">
+                    <button class="menu-item" @onclick="ToggleSource"><Icon Name="code" Size="16" /> @(showSource ? "Show message" : "View source")</button>
+                    <button class="menu-item" @onclick="() => { showDetails = !showDetails; moreOpen = false; }"><Icon Name="file" Size="16" /> @(showDetails ? "Hide" : "Show") header details</button>
+                    @if (hasRemoteContent && !remoteContentAllowed)
+                    {
+                        <button class="menu-item" @onclick="AllowRemoteContent"><Icon Name="image-off" Size="16" /> Load remote content</button>
+                    }
+                </div>
+            }
+        </span>
+    }
+</div>
+
+<div class="reader">
+    @if (!string.IsNullOrEmpty(loadError))
+    {
+        <div class="reader-inner">
+            <div class="alert err"><Icon Name="alert" Size="15" /><div>Could not load this message: @loadError</div></div>
+            <button class="btn small" @onclick="LoadMessage">Retry</button>
+        </div>
+    }
+    else if (message == null)
+    {
+        <div class="reader-inner">
+            <div class="skeleton line" style="height:20px;width:60%;margin-bottom:1.25rem;"></div>
+            <div style="display:flex;gap:.75rem;margin-bottom:1.5rem;">
+                <div class="skeleton circle" style="width:42px;height:42px;"></div>
+                <div style="flex:1;"><div class="skeleton line" style="width:35%;"></div><div class="skeleton line" style="width:50%;"></div></div>
+            </div>
+            @for (var i = 0; i < 6; i++) { <div class="skeleton line" style="width:@(70 + i * 13 % 30)%;"></div> }
+        </div>
+    }
+    else
+    {
+        var sender = MailFormat.ParseAddress(Header("From"));
+        var to = MailFormat.ParseAddressList(Header("To"));
+        var cc = MailFormat.ParseAddressList(Header("Cc"));
+        <div class="reader-inner">
+            <h1 class="reader-subject">@(string.IsNullOrWhiteSpace(Header("Subject")) ? "(no subject)" : Header("Subject"))</h1>
+
+            <div class="sender">
+                <div class="avatar lg" style="--hue:@MailFormat.AvatarHue(sender)">@MailFormat.Initials(sender)</div>
+                <div class="sender-meta">
+                    <div class="sender-name">
+                        <strong>@(sender.Display.Length > 0 ? sender.Display : "(unknown sender)")</strong>
+                        @if (sender.Name.Length > 0) { <span class="addr">&lt;@sender.Email&gt;</span> }
+                    </div>
+                    <div class="recipients">
+                        to @RecipientSummary(to, cc)
+                        <button @onclick="() => showDetails = !showDetails" title="Details"><Icon Name="chevron-down" Size="14" /></button>
+                    </div>
+                    @if (showDetails)
+                    {
+                        <dl class="header-details">
+                            <dt>From</dt><dd>@Header("From")</dd>
+                            @if (to.Count > 0) { <dt>To</dt><dd>@string.Join(", ", to)</dd> }
+                            @if (cc.Count > 0) { <dt>Cc</dt><dd>@string.Join(", ", cc)</dd> }
+                            @if (Header("Reply-To").Length > 0) { <dt>Reply-To</dt><dd>@Header("Reply-To")</dd> }
+                            <dt>Date</dt><dd>@MailFormat.FullDate(Header("Date"), State.TimeZone)</dd>
+                            @if (Header("Message-ID").Length > 0) { <dt>Message-ID</dt><dd>@Header("Message-ID")</dd> }
+                        </dl>
+                    }
+                </div>
+                <div class="sender-date" title="@Header("Date")">@MailFormat.FullDate(Header("Date"), State.TimeZone)</div>
+            </div>
+
+            @if (showSource)
+            {
+                <pre class="msg-source">@message.Source</pre>
+            }
+            else
+            {
+                @if (message.Pgp != null)
+                {
+                    @PgpBanner
+                }
+
+                @if (hasRemoteContent && !remoteContentAllowed)
+                {
+                    <div class="notice">
+                        <Icon Name="image-off" Size="17" />
+                        <span>Remote images and content are blocked to protect your privacy.</span>
+                        <span class="spacer"></span>
+                        <button class="btn small" @onclick="AllowRemoteContent">Load content</button>
+                    </div>
+                }
+
+                @if (visibleAttachments.Count > 0)
+                {
+                    <div class="attachments">
+                        @foreach (var att in visibleAttachments)
+                        {
+                            <a class="attachment" href="@AttachmentUrl(att)" download="@att.Filename" title="Download @att.Filename">
+                                <span class="file-ext">@Extension(att.Filename)</span>
+                                <span class="file-info">
+                                    <span class="file-name">@att.Filename</span>
+                                    <span class="file-size">@MailFormat.Size(att.Size)</span>
+                                </span>
+                                <Icon Name="download" Size="16" />
+                            </a>
+                        }
+                    </div>
+                }
+                @foreach (var att in visibleAttachments.Where(a => LooksLikeKey(a.Filename, a.ContentType, a.Size)))
+                {
+                    var a = att;
+                    <AttachedKeyOffer @key="@("m" + a.PartId)" Filename="@a.Filename" Sender="sender"
+                                      Load="async () => (await Api.GetAttachmentAsync(loadedFolder!, loadedUid!.Value, a.PartId))?.Data" />
+                }
+                @foreach (var att in decryptedAttachments.Where(a => LooksLikeKey(a.Filename, a.ContentType, a.Data.LongLength)))
+                {
+                    var a = att;
+                    <AttachedKeyOffer @key="@("d" + a.PartId)" Filename="@a.Filename" Sender="sender" Load="() => Task.FromResult<byte[]?>(a.Data)" />
+                }
+                @if (decryptedAttachments.Count > 0)
+                {
+                    <div class="attachments">
+                        @foreach (var att in decryptedAttachments)
+                        {
+                            var a = att;
+                            <button class="attachment" @onclick="() => DownloadDecrypted(a)" title="Download @a.Filename (decrypted in your browser)">
+                                <span class="file-ext">@Extension(a.Filename)</span>
+                                <span class="file-info">
+                                    <span class="file-name">@a.Filename</span>
+                                    <span class="file-size">@MailFormat.Size(a.Data.LongLength) · <Icon Name="lock" Size="10" Class="inline-icon" /> decrypted</span>
+                                </span>
+                                <Icon Name="download" Size="16" />
+                            </button>
+                        }
+                    </div>
+                }
+
+                @if (!string.IsNullOrEmpty(html))
+                {
+                    <div class="mail-frame-wrap">
+                        <iframe @ref="frame" class="mail-frame" srcdoc="@frameDoc"
+                                sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+                                referrerpolicy="no-referrer" title="Message content"></iframe>
+                    </div>
+                }
+                else if (!string.IsNullOrWhiteSpace(text) && !(message.Pgp?.Kind == PgpMessageKind.InlineEncrypted && !decrypted))
+                {
+                    <div class="msg-body-text">@((MarkupString)MailFormat.TextToHtml(text))</div>
+                }
+                else if (message.Pgp?.Kind is not (PgpMessageKind.Encrypted or PgpMessageKind.InlineEncrypted) || pgpState == PgpState.Done)
+                {
+                    <p class="muted">This message has no text content.</p>
+                }
+
+                <div class="quick-reply">
+                    <button class="btn" @onclick="() => Reply(ComposeMode.Reply)"><Icon Name="reply" Size="16" /> Reply</button>
+                    @if (to.Count + cc.Count > 1)
+                    {
+                        <button class="btn" @onclick="() => Reply(ComposeMode.ReplyAll)"><Icon Name="reply-all" Size="16" /> Reply all</button>
+                    }
+                    <button class="btn" @onclick="() => Reply(ComposeMode.Forward)"><Icon Name="forward" Size="16" /> Forward</button>
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@if (unlockFor != null)
+{
+    <PgpUnlockDialog Key="unlockFor" Reason="Unlock your key to read this encrypted message."
+                     OnUnlocked="AfterUnlock" OnCancel="() => unlockFor = null" />
+}
+
+@code {
+    private MessageContent? message;
+    private string? html, text;
+
+    // OpenPGP
+    private enum PgpState { Idle, Working, Done, Failed }
+    private PgpState pgpState;
+    private string? pgpError;
+    private bool decrypted;
+    private PgpSignatureResult[] signatures = [];
+    private List<MimeAttachment> decryptedAttachments = new();
+    private PgpKeyRecord? unlockFor;
+    private string? loadError;
+    private string frameDoc = "";
+    private bool hasRemoteContent;
+    private bool remoteContentAllowed;
+    private bool showSource;
+    private bool showDetails;
+    private bool moreOpen;
+    private bool needsFit;
+    private List<AttachmentInfo> visibleAttachments = new();
+    private ElementReference frame;
+    private int loadToken;
+
+    // Avoid refetching the same message on every parent re-render.
+    private long? loadedUid;
+    private string? loadedFolder;
+
+    protected override async Task OnInitializedAsync()
+    {
+        State.StateChanged += OnStateChanged;
+        await LoadMessage();
+    }
+
+    private async void OnStateChanged() => await InvokeAsync(async () =>
+    {
+        if (State.SelectedFolder != loadedFolder || State.SelectedMessageUid != loadedUid)
+            await LoadMessage();
+        StateHasChanged();
+    });
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!needsFit || html == null || showSource) return;
+        needsFit = false;
+        try { await JS.InvokeVoidAsync("nullifyApp.fitFrame", frame); } catch { /* circuit gone */ }
+    }
+
+    private async Task LoadMessage()
+    {
+        var folder = State.SelectedFolder;
+        var uid = State.SelectedMessageUid;
+        if (folder == null || uid == null) return;
+        var token = ++loadToken;
+        loadedFolder = folder;
+        loadedUid = uid;
+        message = null;
+        loadError = null;
+        remoteContentAllowed = false;
+        showSource = false;
+        showDetails = false;
+        moreOpen = false;
+        StateHasChanged();
+        try
+        {
+            var loaded = await Api.GetMessageAsync(folder, uid.Value);
+            if (token != loadToken) return;
+            message = loaded;
+        }
+        catch (Exception ex)
+        {
+            if (token != loadToken) return;
+            loadError = ex.InnerException?.Message ?? ex.Message;
+            return;
+        }
+        if (message == null) return;
+
+        pgpState = PgpState.Idle;
+        pgpError = null;
+        decrypted = false;
+        signatures = [];
+        decryptedAttachments = new();
+        ShowBody(message.HtmlBody, message.TextBody);
+        visibleAttachments = (message.Attachments ?? []).Where(a => !a.IsInline).ToList();
+        Actions.MarkSeenLocally(uid.Value);
+
+        if (message.Pgp != null)
+        {
+            StateHasChanged();
+            if (message.Pgp.Kind is PgpMessageKind.Encrypted or PgpMessageKind.InlineEncrypted) await Decrypt(interactive: false);
+            else await Verify();
+        }
+    }
+
+    private void ShowBody(string? newHtml, string? newText)
+    {
+        html = newHtml;
+        text = newText;
+        hasRemoteContent = html != null && MailFormat.HasRemoteContent(html);
+        frameDoc = html != null ? BuildFrameDoc(html, allowRemote: remoteContentAllowed) : "";
+        needsFit = true;
+    }
+
+    // ---- OpenPGP
+
+    private RenderFragment PgpBanner => __builder =>
+    {
+        var kind = message!.Pgp!.Kind;
+        var encrypted = kind is PgpMessageKind.Encrypted or PgpMessageKind.InlineEncrypted;
+        if (pgpState == PgpState.Working)
+        {
+            <div class="pgp-banner"><span class="spinner"></span><span>@(encrypted ? "Decrypting in your browser…" : "Checking the signature…")</span></div>
+        }
+        else if (pgpState == PgpState.Failed)
+        {
+            <div class="pgp-banner bad">
+                <Icon Name="alert" Size="16" />
+                <span>@pgpError</span>
+                <span class="spacer"></span>
+                @if (encrypted) { <button class="btn small" @onclick="() => Decrypt(true)">Try again</button> }
+            </div>
+        }
+        else if (encrypted && !decrypted)
+        {
+            <div class="pgp-banner">
+                <Icon Name="lock" Size="16" />
+                <span>This message is encrypted with OpenPGP.</span>
+                <span class="spacer"></span>
+                <button class="btn small accent" @onclick="() => Decrypt(true)"><Icon Name="key" Size="14" /> Decrypt</button>
+            </div>
+        }
+        else
+        {
+            var tone = signatures.Length == 0 ? "good" : signatures.All(x => x.Valid) ? "good" : signatures.Any(x => x.Status == "bad") ? "bad" : "warn";
+            <div class="pgp-banner @tone">
+                <Icon Name="@(encrypted ? "lock" : signatures.All(x => x.Valid) ? "check" : "alert")" Size="16" />
+                <span class="lines">
+                    @if (encrypted) { <span>Decrypted in your browser — only you and the other recipients could read this.</span> }
+                    @foreach (var sig in signatures)
+                    {
+                        <span>@PgpFormat.SignatureLabel(sig)@(sig.Created is { } c && DateTimeOffset.TryParse(c, out var at) ? $" · {MailFormat.FullDate(at.ToString("R"), State.TimeZone)}" : "")</span>
+                    }
+                    @if (encrypted && signatures.Length == 0) { <small>Not signed, so the sender can't be confirmed.</small> }
+                </span>
+            </div>
+        }
+    };
+
+    /// <summary>Public keys to check signatures with: yours plus every contact's.</summary>
+    private async Task<List<string>> VerificationKeys()
+    {
+        var keys = (await PgpStore.ListAsync()).Select(k => k.PublicKey).ToList();
+        try
+        {
+            if (await Dav.GetContactsAsync() is { } list)
+                keys.AddRange(list.Contacts.Where(c => c.PublicKey != null).Select(c => c.PublicKey!));
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException) { }
+        return keys;
+    }
+
+    private async Task Verify()
+    {
+        var info = message!.Pgp!;
+        pgpState = PgpState.Working;
+        try
+        {
+            var keys = await VerificationKeys();
+            if (info.Kind == PgpMessageKind.Signed)
+            {
+                signatures = await Pgp.VerifyDetachedAsync(Convert.FromBase64String(info.SignedEntityBase64!), info.Signature!, keys);
+            }
+            else
+            {
+                var r = await Pgp.VerifyCleartextAsync(info.Armored!, keys);
+                signatures = r.Signatures;
+                ShowBody(null, r.Text);
+            }
+            pgpState = PgpState.Done;
+        }
+        catch (PgpException ex) { (pgpState, pgpError) = (PgpState.Failed, $"Couldn't check the signature: {ex.Message}"); }
+        catch (InvalidOperationException) { pgpState = PgpState.Idle; } // prerender
+    }
+
+    /// <summary>
+    /// Decrypt in the browser. Non-interactive (on open) only proceeds if the right key is
+    /// already unlocked; otherwise the user presses Decrypt and is asked to unlock.
+    /// </summary>
+    private async Task Decrypt(bool interactive)
+    {
+        var info = message!.Pgp!;
+        PgpKeyRecord? match = null;
+        try
+        {
+            var recipients = await Pgp.RecipientsAsync(info.Armored!);
+            foreach (var k in await PgpStore.ListAsync())
+            {
+                var ids = (await Pgp.InspectAsync(k.PublicKey)).SelectMany(i => i.KeyIds);
+                if (ids.Intersect(recipients, StringComparer.OrdinalIgnoreCase).Any()) { match = k; break; }
+            }
+            if (match == null)
+            {
+                if (!interactive) return;
+                (pgpState, pgpError) = (PgpState.Failed, recipients.Length == 0
+                    ? "This message doesn't say which key it's encrypted to, and none of your keys could open it."
+                    : $"This message is encrypted to {string.Join(", ", recipients.Select(PgpFormat.Fingerprint))}, which isn't one of your keys.");
+                return;
+            }
+            if (!await Pgp.IsUnlockedAsync(match.Fingerprint))
+            {
+                if (interactive) unlockFor = match;
+                return;
+            }
+
+            pgpState = PgpState.Working;
+            StateHasChanged();
+            var result = await Pgp.DecryptAsync(info.Armored!, await VerificationKeys());
+            signatures = result.Signatures;
+            if (info.Kind == PgpMessageKind.InlineEncrypted)
+            {
+                ShowBody(null, System.Text.Encoding.UTF8.GetString(result.Data));
+            }
+            else
+            {
+                // PGP/MIME: the plaintext is a whole MIME entity (body, alternatives, attachments).
+                var inner = MimeParser.Parse(result.Data);
+                if (inner.PgpSignedEntity != null && inner.PgpSignature != null)
+                {
+                    signatures = [.. signatures, .. await Pgp.VerifyDetachedAsync(
+                        System.Text.Encoding.Latin1.GetBytes(inner.PgpSignedEntity), inner.PgpSignature, await VerificationKeys())];
+                }
+                ShowBody(inner.HtmlBody != null ? MailService.InlineCidImages(inner.HtmlBody, inner.Attachments) : null, inner.TextBody);
+                decryptedAttachments = inner.Attachments.Where(a => !a.IsInline).ToList();
+            }
+            decrypted = true;
+            pgpState = PgpState.Done;
+        }
+        catch (PgpException ex) when (ex.Locked)
+        {
+            // The key locked itself (idle timeout) between the check and the decrypt: ask again.
+            pgpState = PgpState.Idle;
+            if (interactive) unlockFor = match;
+        }
+        catch (PgpException ex) { (pgpState, pgpError) = (PgpState.Failed, ex.Message); }
+        catch (InvalidOperationException) { pgpState = PgpState.Idle; } // prerender: JS not ready
+    }
+
+    private async Task AfterUnlock()
+    {
+        unlockFor = null;
+        await Decrypt(interactive: true);
+    }
+
+    /// <summary>An attachment worth offering to save as a contact's key.</summary>
+    private static bool LooksLikeKey(string filename, string contentType, long size)
+    {
+        if (size is <= 0 or > 512 * 1024) return false;
+        if (contentType.StartsWith("application/pgp-keys", StringComparison.OrdinalIgnoreCase)) return true;
+        var name = filename.ToLowerInvariant();
+        if (name is "signature.asc" or "encrypted.asc" || name.Contains("signature")) return false;
+        return name.EndsWith(".asc") && (name.Contains("key") || name.Contains("pub") || name.StartsWith("0x"))
+               || name.EndsWith(".key") || name.EndsWith(".pubkey");
+    }
+
+    private Task DownloadDecrypted(MimeAttachment a) => Pgp.DownloadAsync(a.Filename, a.Data, a.ContentType);
+
+    private string Header(string name) =>
+        message?.Headers != null && message.Headers.TryGetValue(name, out var v) ? v : "";
+
+    private string RecipientSummary(List<MailFormat.Address> to, List<MailFormat.Address> cc)
+    {
+        var me = MailFormat.ParseAddress(State.Session?.Email).Email;
+        var names = to.Concat(cc)
+            .Select(a => a.Email.Equals(me, StringComparison.OrdinalIgnoreCase) ? "me" : a.Display)
+            .Distinct()
+            .ToList();
+        if (names.Count == 0) return "undisclosed recipients";
+        return names.Count <= 3 ? string.Join(", ", names) : $"{string.Join(", ", names.Take(3))} and {names.Count - 3} more";
+    }
+
+    /// <summary>
+    /// The message runs in a sandbox with scripts disabled; a CSP inside the document is
+    /// what actually blocks remote loads (tracking pixels, fonts, CSS) until allowed.
+    /// </summary>
+    private static string BuildFrameDoc(string html, bool allowRemote)
+    {
+        var csp = allowRemote
+            ? "default-src 'none'; img-src * data:; style-src 'unsafe-inline' *; font-src * data:; media-src * data:"
+            : "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; media-src data:";
+        return "<!DOCTYPE html><html><head><meta charset=\"utf-8\">" +
+               $"<meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">" +
+               "<meta name=\"referrer\" content=\"no-referrer\"><base target=\"_blank\">" +
+               "<style>html,body{margin:0;}body{padding:4px 2px 16px;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;" +
+               "font-size:14px;line-height:1.55;color:#1d2330;background:#fff;overflow-wrap:anywhere;}" +
+               "img{max-width:100%;height:auto;}a{color:#3b5bdb;}pre{white-space:pre-wrap;}" +
+               "blockquote{border-left:3px solid #d2d6de;margin:.5em 0;padding-left:12px;color:#5d6677;}</style>" +
+               "</head><body>" + html + "</body></html>";
+    }
+
+    private void AllowRemoteContent()
+    {
+        if (html == null) return;
+        remoteContentAllowed = true;
+        moreOpen = false;
+        frameDoc = BuildFrameDoc(html, allowRemote: true);
+        needsFit = true;
+    }
+
+    private void ToggleSource()
+    {
+        showSource = !showSource;
+        moreOpen = false;
+        needsFit = !showSource;
+    }
+
+    private string AttachmentUrl(AttachmentInfo a) =>
+        $"api/mail/attachment?folder={Uri.EscapeDataString(State.SelectedFolder ?? "")}&uid={State.SelectedMessageUid}&part={Uri.EscapeDataString(a.PartId)}";
+
+    private static string Extension(string filename)
+    {
+        var dot = filename.LastIndexOf('.');
+        var ext = dot >= 0 && dot < filename.Length - 1 ? filename[(dot + 1)..] : "file";
+        return ext.Length > 4 ? ext[..4] : ext;
+    }
+
+    private void Reply(ComposeMode mode) =>
+        State.StartCompose(mode, State.SelectedFolder, State.SelectedMessageUid);
+
+    private void Close()
+    {
+        State.SelectedMessageUid = null;
+        State.NotifyStateChanged();
+    }
+
+    public void Dispose() => State.StateChanged -= OnStateChanged;
+}

@@ -1,0 +1,167 @@
+@* Copyright 2026 Simon Soanes
+   SPDX-License-Identifier: Apache-2.0 *@
+@using System.Text.Json
+@using Nullify.WebMail.Controllers
+@using Nullify.WebMail.Services
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+@inject QrLoginService QrLogins
+@implements IDisposable
+
+@* Desktop half of signing in from a phone: show a QR code, wait for the phone, collect the session. *@
+<div class="qr-signin">
+    @if (svg != null)
+    {
+        <div class="qr-code" role="img" aria-label="QR code to scan with your phone">@((MarkupString)svg)</div>
+        <div class="qr-match">
+            <span>Number to pick on your phone</span>
+            <strong>@matchCode</strong>
+        </div>
+    }
+    else if (error == null)
+    {
+        <div class="qr-code placeholder"><span class="spinner"></span></div>
+    }
+
+    @if (error != null)
+    {
+        <div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@error</div></div>
+        <button type="button" class="btn block" @onclick="Restart">Show a new code</button>
+    }
+    else
+    {
+        <p class="qr-status" aria-live="polite">@status</p>
+    }
+
+    <ol class="qr-steps">
+        <li>Scan the code with your phone's camera.</li>
+        <li>On your phone, pick the number shown here, then sign in.</li>
+    </ol>
+    <p class="fine-print"><Icon Name="shield" Size="13" /><span>Your password is typed on your phone and never reaches this computer. This computer is signed in until you close the browser, for at most @Hours(QrLogins.SessionLifetime). Anything you open here can still be seen or recorded on this computer.</span></p>
+</div>
+
+@code {
+    private string? id;
+    private int matchCode;
+    private string? svg;
+    private string status = "Waiting for your phone…";
+    private string? error;
+    private DateTime startedUtc;
+
+    // Keep showing fresh codes for a while; after that, wait for the user to ask for one.
+    private static readonly TimeSpan GiveUpAfter = TimeSpan.FromMinutes(10);
+
+    protected override void OnInitialized() => QrLogins.Changed += OnChanged;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            startedUtc = DateTime.UtcNow;
+            await StartAsync();
+        }
+    }
+
+    private async Task StartAsync()
+    {
+        if (id != null) QrLogins.Cancel(id);
+        id = null;
+        svg = null;
+        error = null;
+        status = "Waiting for your phone…";
+        StateHasChanged();
+        try
+        {
+            // A real browser request, so the HttpOnly binding cookie lands in this browser.
+            var result = await JS.InvokeAsync<JsonElement>("nullifyAuth.postJson", "/api/auth/qr/start", new { });
+            if (!result.GetProperty("ok").GetBoolean())
+            {
+                error = result.GetProperty("status").GetInt32() == 429
+                    ? "Too many codes requested. Wait a minute and try again."
+                    : "Couldn't start sign-in by phone.";
+                return;
+            }
+            var start = JsonSerializer.Deserialize<QrStartResponse>(result.GetProperty("text").GetString() ?? "", JsonOpts)!;
+            id = start.Id;
+            matchCode = start.Code;
+            svg = QrCode.Encode(start.ApproveUrl).ToSvg();
+        }
+        catch (Exception ex)
+        {
+            error = $"Connection error: {ex.Message}";
+        }
+        finally
+        {
+            StateHasChanged();
+        }
+    }
+
+    private Task Restart()
+    {
+        startedUtc = DateTime.UtcNow;
+        return StartAsync();
+    }
+
+    private void OnChanged(string changedId, QrLoginState state)
+    {
+        if (changedId != id) return;
+        _ = InvokeAsync(async () =>
+        {
+            switch (state)
+            {
+                case QrLoginState.Scanned:
+                    status = $"Phone connected. Pick {matchCode} on your phone.";
+                    break;
+                case QrLoginState.Confirmed:
+                    status = "Number matched. Sign in on your phone.";
+                    break;
+                case QrLoginState.Approved:
+                    status = "Signing in…";
+                    StateHasChanged();
+                    await RedeemAsync();
+                    return;
+                case QrLoginState.Failed:
+                    await StartAsync();
+                    status = "The sign-in on the phone was cancelled. Scan this new code to try again.";
+                    break;
+                case QrLoginState.Expired:
+                    if (DateTime.UtcNow - startedUtc < GiveUpAfter) await StartAsync();
+                    else { QrLogins.Cancel(id!); id = null; svg = null; error = "The code expired."; }
+                    break;
+            }
+            StateHasChanged();
+        });
+    }
+
+    private async Task RedeemAsync()
+    {
+        try
+        {
+            var result = await JS.InvokeAsync<JsonElement>("nullifyAuth.postJson", $"/api/auth/qr/{id}/redeem", new { });
+            var resp = JsonSerializer.Deserialize<LoginResponse>(result.GetProperty("text").GetString() ?? "", JsonOpts);
+            if (resp is { Success: true })
+            {
+                id = null; // redeemed: nothing to cancel
+                Nav.NavigateTo("/", forceLoad: true);
+                return;
+            }
+            error = resp?.Error ?? "Sign-in failed.";
+        }
+        catch (Exception ex)
+        {
+            error = $"Connection error: {ex.Message}";
+        }
+        StateHasChanged();
+    }
+
+    private static string Hours(TimeSpan t) =>
+        t.TotalHours >= 1 ? $"{t.TotalHours:0.#} hours" : $"{t.TotalMinutes:0} minutes";
+
+    public void Dispose()
+    {
+        QrLogins.Changed -= OnChanged;
+        if (id != null) QrLogins.Cancel(id);
+    }
+
+    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
+}

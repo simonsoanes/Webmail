@@ -1,0 +1,381 @@
+@using Nullify.WebMail.Services
+@inject CalDavAccountService Dav
+@inject AppState State
+@inject IJSRuntime JS
+@inject PgpBrowser Pgp
+
+@* Two panes when there's room; one pane at a time (list → contact → back) when there isn't. *@
+<div class="contacts-shell">
+    <div class="contacts-grid @(DetailOpen ? "show-detail" : "")">
+        <section class="contacts-pane-list" aria-label="Contacts">
+            <div class="pane-head">
+                <h2>Contacts</h2>
+                @if (list != null) { <span class="muted">@list.Contacts.Count</span> }
+                @if (loading) { <span class="spinner" style="color:var(--muted);" aria-label="Loading"></span> }
+                <span class="spacer"></span>
+                <button class="icon-btn" @onclick="Refresh" title="Refresh" disabled="@loading"><Icon Name="refresh" Size="17" /></button>
+                @if (status == Status.Ready)
+                {
+                    <button class="btn accent small" @onclick="StartNew"><Icon Name="plus" Size="14" /> New</button>
+                }
+            </div>
+
+            @switch (status)
+            {
+                case Status.NotConfigured:
+                    <div class="empty-state">
+                        <div class="empty-icon"><Icon Name="users" Size="26" /></div>
+                        <h3>No address book connected</h3>
+                        <p>Contacts come from the same server as your calendar. Set one up in Settings.</p>
+                        <button class="btn" @onclick="OpenSettings">Open settings</button>
+                    </div>
+                    break;
+                case Status.NeedsReentry:
+                    <div class="pane-pad">
+                        <div class="alert warn" role="alert">
+                            <Icon Name="lock" Size="15" />
+                            <div>Your saved CalDAV password needs to be entered again because your mail password changed.
+                                <button class="link-btn" @onclick="OpenSettings">Open settings</button></div>
+                        </div>
+                    </div>
+                    break;
+                case Status.Error:
+                    <div class="pane-pad">
+                        <div class="alert err" role="alert">
+                            <Icon Name="alert" Size="15" />
+                            <div>Couldn't load your contacts: @error
+                                <button class="link-btn" @onclick="OpenSettings">Check settings</button></div>
+                        </div>
+                    </div>
+                    break;
+            }
+
+            @if (list != null && status == Status.Ready)
+            {
+                <div class="pane-pad">
+                    @foreach (var e in list.Errors)
+                    {
+                        <div class="alert warn"><Icon Name="alert" Size="15" /><div>@e</div></div>
+                    }
+                    <div class="list-search">
+                        <Icon Name="search" Size="16" />
+                        <input @bind="query" @bind:event="oninput" placeholder="Search contacts" aria-label="Search contacts" />
+                        @if (query.Length > 0)
+                        {
+                            <button class="icon-btn small clear" @onclick="() => query = string.Empty" title="Clear search"><Icon Name="x" Size="15" /></button>
+                        }
+                    </div>
+                    @if (list.AddressBooks.Count > 1)
+                    {
+                        <div class="filter-chips" role="group" aria-label="Address books">
+                            <button class="filter-chip @(book == null ? "on" : "")" aria-pressed="@(book == null)" @onclick="() => book = null">All</button>
+                            @foreach (var b in list.AddressBooks)
+                            {
+                                var id = b.Id;
+                                <button class="filter-chip @(book == id ? "on" : "")" aria-pressed="@(book == id)" @onclick="() => book = id">@b.Name</button>
+                            }
+                        </div>
+                    }
+                </div>
+
+                var matches = Filtered().ToList();
+                <div class="contact-rows">
+                    @if (matches.Count == 0)
+                    {
+                        <div class="empty-state">
+                            <div class="empty-icon"><Icon Name="@(query.Length > 0 ? "search" : "users")" Size="24" /></div>
+                            <h3>@(query.Length > 0 ? "No matches" : "No contacts yet")</h3>
+                            <p>@(query.Length > 0 ? $"Nobody matches \"{query}\"." : "Add your first contact with New.")</p>
+                        </div>
+                    }
+                    @foreach (var group in matches.GroupBy(c => Letter(c.FullName)))
+                    {
+                        <div class="contact-letter">@group.Key</div>
+                        @foreach (var c in group)
+                        {
+                            var contact = c;
+                            <button class="contact-row @(selected?.Uid == contact.Uid && !creating ? "active" : "")" @onclick="() => Select(contact)">
+                                <Avatar Contact="contact" />
+                                <span class="contact-text">
+                                    <span class="contact-name">@contact.FullName</span>
+                                    <span class="contact-detail">@(contact.Email ?? contact.Organization ?? contact.Phone)</span>
+                                </span>
+                            </button>
+                        }
+                    }
+                </div>
+            }
+        </section>
+
+        <section class="contacts-pane-detail" aria-label="Contact details">
+            @if (creating || editing)
+            {
+                <div class="detail-scroll">
+                    <div class="detail-inner">
+                        <button class="btn ghost small narrow-back" @onclick="CancelEdit"><Icon Name="arrow-left" Size="15" /> Back</button>
+                        <ContactEditor @key="@(creating ? "new" : selected?.Uid)" Contact="@(creating ? null : selected)"
+                                       AddressBooks="@(list?.AddressBooks ?? [])"
+                                       OnSave="SaveAsync" OnCancel="CancelEdit"
+                                       OnDelete="@(creating ? default : EventCallback.Factory.Create(this, DeleteAsync))" />
+                    </div>
+                </div>
+            }
+            else if (selected != null)
+            {
+                var s = selected;
+                <div class="pane-toolbar">
+                    <button class="icon-btn narrow-back" @onclick="() => selected = null" title="Back to contacts"><Icon Name="arrow-left" /></button>
+                    <span class="spacer"></span>
+                    @if (s.Email != null)
+                    {
+                        <button class="btn ghost small" @onclick="() => Write(s, s.Email)"><Icon Name="mail" Size="15" /> Email</button>
+                    }
+                    <button class="btn ghost small" @onclick="() => editing = true" disabled="@(s.Href == null)"
+                            title="@(s.Href == null ? "This contact can't be edited" : "Edit contact")"><Icon Name="pen" Size="15" /> Edit</button>
+                </div>
+                <div class="detail-scroll">
+                    <div class="detail-inner">
+                        <div class="contact-hero">
+                            <Avatar Contact="s" Large="true" />
+                            <div>
+                                <h3>@s.FullName</h3>
+                                @if (s.Title != null || s.Organization != null)
+                                {
+                                    <p class="muted">@string.Join(" · ", new[] { s.Title, s.Organization }.Where(x => x != null))</p>
+                                }
+                            </div>
+                        </div>
+                        @if (s.Emails.Count > 0)
+                        {
+                            <div class="contact-section">
+                                <h4>Email</h4>
+                                @foreach (var e in s.Emails)
+                                {
+                                    var email = e;
+                                    <div class="contact-value">
+                                        <span><span class="label">@(email.Label ?? "Email")</span>@email.Value</span>
+                                        <button class="btn small" @onclick="() => Write(s, email.Value)" title="Write to @email.Value"><Icon Name="pen" Size="14" /> Write</button>
+                                    </div>
+                                }
+                            </div>
+                        }
+                        @if (s.Phones.Count > 0)
+                        {
+                            <div class="contact-section">
+                                <h4>Phone</h4>
+                                @foreach (var p in s.Phones)
+                                {
+                                    <div class="contact-value">
+                                        <span><span class="label">@(p.Label ?? "Phone")</span><a href="tel:@p.Value.Replace(" ", "")">@p.Value</a></span>
+                                    </div>
+                                }
+                            </div>
+                        }
+                        @if (s.Birthday != null)
+                        {
+                            <div class="contact-section"><h4>Birthday</h4><div class="contact-value"><span>@FormatBirthday(s.Birthday)</span></div></div>
+                        }
+                        @if (s.Note != null)
+                        {
+                            <div class="contact-section"><h4>Notes</h4><div class="msg-body-text">@((MarkupString)MailFormat.TextToHtml(s.Note))</div></div>
+                        }
+                        @if (s.PublicKey != null)
+                        {
+                            <div class="contact-section">
+                                <h4>OpenPGP key</h4>
+                                @if (shownKey != null && shownKeyFor == s.PublicKey)
+                                {
+                                    <div class="key-chip">
+                                        <span class="key-uid">@(shownKey.PrimaryUserId ?? "Public key")</span>
+                                        <code>@PgpFormat.Fingerprint(shownKey.Fingerprint)</code>
+                                        <span class="muted" style="font-size:.78rem;">
+                                            @shownKey.Algorithm · @(shownKey.Expires is { } x ? (shownKey.Expired ? $"expired {x:d MMM yyyy}" : $"expires {x:d MMM yyyy}") : "no expiry")
+                                            @if (!shownKey.CanEncrypt) { <span> · can't be used for encryption</span> }
+                                        </span>
+                                    </div>
+                                }
+                                else if (shownKeyError != null) { <p class="muted">@shownKeyError</p> }
+                                <div style="margin-top:.4rem;">
+                                    <button class="btn small" @onclick="() => DownloadKey(s)"><Icon Name="download" Size="14" /> Download</button>
+                                </div>
+                            </div>
+                        }
+                        @if (list?.AddressBooks.Count > 1)
+                        {
+                            <p class="muted" style="margin-top:1rem;font-size:.8rem;">In @(list.AddressBooks.FirstOrDefault(b => b.Id == s.AddressBookId)?.Name)</p>
+                        }
+                    </div>
+                </div>
+            }
+            else
+            {
+                <div class="empty-state">
+                    <div class="empty-icon"><Icon Name="user" Size="26" /></div>
+                    <h3>No contact selected</h3>
+                    <p>Choose someone from the list, or add a new contact.</p>
+                </div>
+            }
+        </section>
+    </div>
+</div>
+
+@code {
+    private enum Status { Loading, Ready, NotConfigured, NeedsReentry, Error }
+
+    private ContactList? list;
+    private ContactInfo? selected;
+    private bool creating, editing;
+    private string query = "";
+    private string? book;
+    private Status status = Status.Loading;
+    private string? error;
+    private bool loading;
+
+    private bool DetailOpen => selected != null || creating;
+
+    // The selected contact's OpenPGP key, inspected in the browser after render.
+    private PgpKeyInfo? shownKey;
+    private string? shownKeyFor, shownKeyError;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        var key = selected?.PublicKey;
+        if (key == null || key == shownKeyFor) return;
+        shownKeyFor = key;
+        shownKey = null;
+        shownKeyError = null;
+        try { shownKey = (await Pgp.InspectAsync(key)).FirstOrDefault(); }
+        catch (PgpException ex) { shownKeyError = $"This key can't be read: {ex.Message}"; }
+        StateHasChanged();
+    }
+
+    private Task DownloadKey(ContactInfo c) =>
+        Pgp.DownloadAsync($"{(shownKey?.Fingerprint is { Length: >= 16 } f ? f[^16..] : c.FullName)}.asc",
+            System.Text.Encoding.UTF8.GetBytes(c.PublicKey!), "application/pgp-keys");
+
+    protected override Task OnInitializedAsync() => Load(refresh: false);
+
+    private async Task Load(bool refresh)
+    {
+        loading = true;
+        try
+        {
+            list = await Dav.GetContactsAsync(refresh);
+            status = list == null ? Status.NotConfigured : Status.Ready;
+            if (selected != null) selected = list?.Contacts.FirstOrDefault(c => c.Uid == selected.Uid);
+        }
+        catch (InvalidOperationException)
+        {
+            status = Status.NeedsReentry;
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException)
+        {
+            status = Status.Error;
+            error = ex is TaskCanceledException ? "the server did not respond in time." : ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private Task Refresh() => Load(refresh: true);
+
+    private void Select(ContactInfo c)
+    {
+        selected = c;
+        creating = editing = false;
+    }
+
+    private void StartNew()
+    {
+        creating = true;
+        editing = false;
+    }
+
+    private void CancelEdit()
+    {
+        if (creating) selected = null;
+        creating = editing = false;
+    }
+
+    private async Task<string?> SaveAsync(ContactEdit edit, string? addressBookId)
+    {
+        try
+        {
+            var saved = await Dav.SaveContactAsync(creating ? null : selected, edit, addressBookId);
+            State.ShowToast(creating ? $"Added {saved.FullName}" : $"Saved {saved.FullName}");
+            list = await Dav.GetContactsAsync();
+            selected = list?.Contacts.FirstOrDefault(c => c.Href == saved.Href) ?? saved;
+            creating = editing = false;
+            StateHasChanged(); // invoked as a plain delegate from the editor, so re-render explicitly
+            return null;
+        }
+        catch (CalDavException ex) { return ex.Message; }
+        catch (InvalidOperationException ex) { return ex.Message; }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return ex is TaskCanceledException ? "The server did not respond in time." : $"Could not reach the server: {ex.Message}";
+        }
+    }
+
+    private async Task DeleteAsync()
+    {
+        if (selected == null) return;
+        try
+        {
+            await Dav.DeleteContactAsync(selected);
+            State.ShowToast($"Deleted {selected.FullName}");
+            list = await Dav.GetContactsAsync();
+            selected = null;
+            editing = false;
+            StateHasChanged();
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException)
+        {
+            State.ShowToast($"Couldn't delete: {ex.Message}", isError: true);
+        }
+    }
+
+    private IEnumerable<ContactInfo> Filtered()
+    {
+        var all = list?.Contacts ?? [];
+        if (book != null) all = all.Where(c => c.AddressBookId == book).ToList();
+        var q = query.Trim();
+        if (q.Length == 0) return all;
+        var digits = new string(q.Where(char.IsDigit).ToArray());
+        return all.Where(c =>
+            c.FullName.Contains(q, StringComparison.CurrentCultureIgnoreCase)
+            || c.Organization?.Contains(q, StringComparison.CurrentCultureIgnoreCase) == true
+            || c.Emails.Any(e => e.Value.Contains(q, StringComparison.OrdinalIgnoreCase))
+            || (digits.Length >= 3 && c.Phones.Any(p => new string(p.Value.Where(char.IsDigit).ToArray()).Contains(digits))));
+    }
+
+    private static string Letter(string name)
+    {
+        var first = name.TrimStart().FirstOrDefault();
+        return char.IsLetter(first) ? char.ToUpperInvariant(first).ToString() : "#";
+    }
+
+    private static string FormatBirthday(string raw)
+    {
+        // vCard 3: 1990-05-17 or 19900517; vCard 4 also allows --0517 (no year).
+        string[] formats = ["yyyy-MM-dd", "yyyyMMdd", "--MMdd", "--MM-dd"];
+        return DateTime.TryParseExact(raw.Length > 10 ? raw[..10] : raw, formats, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out var d)
+            ? d.ToString(raw.StartsWith("--") ? "d MMMM" : "d MMMM yyyy", System.Globalization.CultureInfo.InvariantCulture)
+            : raw;
+    }
+
+    private void Write(ContactInfo contact, string email)
+    {
+        State.ActiveTab = "mail";
+        State.StartCompose(ComposeMode.New, to: new MailFormat.Address(contact.FullName, email).ToString());
+    }
+
+    private void OpenSettings()
+    {
+        State.ActiveTab = "settings";
+        State.NotifyStateChanged();
+    }
+}

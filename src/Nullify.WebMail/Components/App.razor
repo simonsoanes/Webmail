@@ -1,0 +1,39 @@
+@inject BrandingService Branding
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>@brand WebMail</title>
+    <base href="/" />
+    @* Apply a saved theme before first paint so there is no light/dark flash. *@
+    <script>try { var t = localStorage.getItem('nullify.theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) { }</script>
+    <link rel="stylesheet" href="css/app.css" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="icon" type="image/png" sizes="48x48" href="favicon.png" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+    <HeadOutlet @rendermode="InteractiveServer" />
+</head>
+<body>
+    <Routes @rendermode="InteractiveServer" />
+    <div id="blazor-error-ui">
+        Connection to the server was lost.
+        <a href="" class="reload">Reload</a>
+    </div>
+    <script src="_framework/blazor.web.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
+
+@code {
+    private string brand = BrandingService.DefaultTitle;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try { brand = await Branding.TitleAsync(); }
+        catch { /* default title */ }
+    }
+}

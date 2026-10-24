@@ -1,0 +1,113 @@
+# CI/CD for Nullify.WebMail: the test suites, then the server image pushed to the Gitea container registry as
+# git.nullify.net/simon/nullify-webmail. The repository is mirrored to https://github.com/simonsoanes/Webmail.
+#
+# Secrets:
+#   GITEADOCKERTOKEN          Gitea access token with package write for user "simon" (registry login).
+#   WEBMAIL_PORTAINER_WEBHOOK Optional Portainer stack/service webhook URL; when set, main and tag builds redeploy.
+#
+# Tags: every build pushes :<commit sha>; main pushes :latest; a v1.2.3 tag pushes :1.2.3, :1.2 and :latest.
+name: WebMail CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+env:
+  IMAGE: git.nullify.net/simon/nullify-webmail
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Prune Docker build cache before building
+        run: docker builder prune -f --filter until=72h || true
+
+      - name: Determine version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            version="${{ github.ref_name }}"; version="${version#v}"
+          else
+            version="0.0.0-ci.$(echo "${{ github.sha }}" | cut -c1-8)"
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "Building version $version"
+
+      # Both suites run inside Dockerfile stages, so the runner needs neither .NET, Node nor GnuPG.
+      - name: Tests
+        run: docker build --target test --build-arg VERSION="$VERSION" .
+
+      - name: OpenPGP interop tests
+        run: docker build --target test-pgp .
+
+      - name: Build image
+        run: |
+          docker build --build-arg VERSION="$VERSION" \
+            --label org.opencontainers.image.source="${{ github.server_url }}/${{ github.repository }}" \
+            --label org.opencontainers.image.revision="${{ github.sha }}" \
+            --label org.opencontainers.image.version="$VERSION" \
+            -t "$IMAGE:${{ github.sha }}" .
+
+      # The runtime image has no curl, so probe it from a curl container sharing its network namespace.
+      # A fresh instance has no users: / prerenders the first-run setup page and the API requires sign-in.
+      - name: Smoke test image
+        run: |
+          docker run -d --name webmail-smoke "$IMAGE:${{ github.sha }}"
+          probe() { docker run --rm --network container:webmail-smoke curlimages/curl:8.11.1 -sS "$@"; }
+          for i in $(seq 1 30); do
+            probe -f -o /dev/null http://127.0.0.1:8080/api/auth/has-users 2>/dev/null && break
+            sleep 2
+          done
+          docker logs webmail-smoke 2>&1 | tail -n 20
+          test "$(probe -f http://127.0.0.1:8080/api/auth/has-users)" = "false"
+          probe -f http://127.0.0.1:8080/ | grep -q "Welcome to Nullify WebMail"
+          probe -f -o /dev/null http://127.0.0.1:8080/js/pgp/index.js
+          probe -f -o /dev/null http://127.0.0.1:8080/_framework/blazor.web.js
+          test "$(probe -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/mail/folders)" = "401"
+
+      - name: Login to Registry
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "${{ secrets.GITEADOCKERTOKEN }}" | docker login -u simon --password-stdin https://git.nullify.net/
+
+      - name: Push image
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push "$IMAGE:${{ github.sha }}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
+            docker push "$IMAGE:latest"
+          fi
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            minor="$(echo "$VERSION" | cut -d. -f1-2)"
+            for tag in "$VERSION" "$minor" latest; do
+              docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:$tag"
+              docker push "$IMAGE:$tag"
+            done
+          fi
+
+      - name: Deploy
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+        env:
+          WEBHOOK: ${{ secrets.WEBMAIL_PORTAINER_WEBHOOK }}
+        run: |
+          if [ -n "$WEBHOOK" ]; then curl -fsS -X POST "$WEBHOOK"; else echo "WEBMAIL_PORTAINER_WEBHOOK not set; skipping deploy."; fi
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f webmail-smoke 2>/dev/null || true
+          docker logout https://git.nullify.net/ 2>/dev/null || true
+          docker image rm "$IMAGE:${{ github.sha }}" "$IMAGE:latest" 2>/dev/null || true
+          docker builder prune -f --filter until=72h || true

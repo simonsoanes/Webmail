@@ -1,0 +1,17 @@
+<Router AppAssembly="typeof(Routes).Assembly">
+    <Found Context="routeData">
+        <RouteView RouteData="routeData" DefaultLayout="typeof(MainLayout)" />
+        @* Focus the field a page marks autofocus (e.g. the sign-in email). Focusing the h1 here
+           took focus off that field and showed a focus ring around the page title. *@
+        <FocusOnNavigate RouteData="routeData" Selector="[autofocus]" />
+    </Found>
+    <NotFound>
+        <LayoutView Layout="typeof(MainLayout)">
+            <div class="empty-state" style="height:100vh;">
+                <div class="empty-icon"><Icon Name="alert" Size="26" /></div>
+                <h3>Page not found</h3>
+                <p><a href="/">Back to your mail</a></p>
+            </div>
+        </LayoutView>
+    </NotFound>
+</Router>

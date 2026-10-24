@@ -1,0 +1,348 @@
+@* Copyright 2026 Simon Soanes
+   SPDX-License-Identifier: Apache-2.0 *@
+@using Nullify.WebMail.Services
+@* Visual editor for the flat rule list SieveRuleParser produces; edits the list in place. *@
+
+<div class="sieve-rules">
+    @if (Rules.Count == 0)
+    {
+        <div class="sieve-rules-empty">
+            <Icon Name="filter" Size="22" />
+            <p>No rules yet. Rules run in order on every message as it arrives.</p>
+        </div>
+    }
+    @for (var i = 0; i < Rules.Count; i++)
+    {
+        var index = i;
+        var rule = Rules[i];
+        var open = expanded.Contains(rule);
+        <div class="sieve-rule @(open ? "open" : "") @(rule.Enabled ? "" : "off")" @key="rule">
+            <div class="sieve-rule-head" @onclick="() => Toggle(rule)">
+                <input type="checkbox" class="switch" checked="@rule.Enabled" title="@(rule.Enabled ? "Enabled" : "Disabled")"
+                       aria-label="Rule enabled" @onclick:stopPropagation="true"
+                       @onchange="e => rule.Enabled = e.Value is true" />
+                <div class="sieve-rule-title">
+                    <strong>@(rule.Name.Length > 0 ? rule.Name : $"Rule {index + 1}")</strong>
+                    <span class="muted">@Summary(rule)</span>
+                </div>
+                <div class="sieve-rule-tools" @onclick:stopPropagation="true">
+                    <button class="icon-btn small" title="Move up" disabled="@(index == 0)" @onclick="() => Move(index, -1)"><Icon Name="chevron-up" Size="15" /></button>
+                    <button class="icon-btn small" title="Move down" disabled="@(index == Rules.Count - 1)" @onclick="() => Move(index, 1)"><Icon Name="chevron-down" Size="15" /></button>
+                    <button class="icon-btn small" title="Delete rule" @onclick="() => Remove(rule)"><Icon Name="trash" Size="15" /></button>
+                </div>
+            </div>
+            @if (open)
+            {
+                <div class="sieve-rule-body">
+                    <label class="sieve-label">Name
+                        <input @bind="rule.Name" @bind:event="oninput" placeholder="e.g. Newsletters" maxlength="200" />
+                    </label>
+
+                    <div class="sieve-section">
+                        @if (rule.Conditions.Count == 0)
+                        {
+                            <span>Applies to <strong>every message</strong>.</span>
+                        }
+                        else if (rule.Conditions.Count == 1)
+                        {
+                            <span>When a message matches:</span>
+                        }
+                        else
+                        {
+                            <span>When a message matches</span>
+                            <select class="compact" @bind:get="MatchKey(rule)" @bind:set="v => SetMatch(rule, v)"
+                                    aria-label="Match all or any">
+                                <option value="all">all</option>
+                                <option value="any">any</option>
+                            </select>
+                            <span>of these:</span>
+                        }
+                    </div>
+                    @foreach (var cond in rule.Conditions)
+                    {
+                        var c = cond;
+                        <div class="sieve-row">
+                            <select @bind:get="c.Field" @bind:set="f => SetField(c, f)" aria-label="Field">
+                                @foreach (var f in Enum.GetValues<SieveField>())
+                                {
+                                    <option value="@f">@FieldLabel(f)</option>
+                                }
+                            </select>
+                            @if (c.Field == SieveField.Header)
+                            {
+                                <input class="sieve-header-name" @bind="c.HeaderName" @bind:event="oninput" placeholder="Header name" aria-label="Header name" />
+                            }
+                            <select @bind:get="OpKey(c)" @bind:set="k => SetOp(c, k)" aria-label="Comparison">
+                                @foreach (var (key, label) in OpsFor(c.Field))
+                                {
+                                    <option value="@key">@label</option>
+                                }
+                            </select>
+                            @if (c.Field == SieveField.Size)
+                            {
+                                <input type="number" min="0" class="sieve-size" aria-label="Size"
+                                       @bind:get="SizeNumber(c)" @bind:set="n => SetSize(c, n, SizeUnit(c))" />
+                                <select class="compact" @bind:get="SizeUnit(c)" @bind:set="u => SetSize(c, SizeNumber(c), u)" aria-label="Unit">
+                                    <option value="">bytes</option>
+                                    <option value="K">KB</option>
+                                    <option value="M">MB</option>
+                                    <option value="G">GB</option>
+                                </select>
+                            }
+                            else if (c.Op != SieveOp.Exists)
+                            {
+                                <div class="sieve-values">
+                                    @for (var v = 0; v < c.Values.Count; v++)
+                                    {
+                                        var vi = v;
+                                        <div class="sieve-value">
+                                            @if (vi > 0) { <span class="muted sieve-or">or</span> }
+                                            <input value="@c.Values[vi]" @oninput="e => c.Values[vi] = e.Value as string ?? string.Empty"
+                                                   placeholder="@Placeholder(c)" aria-label="Value" />
+                                            @if (c.Values.Count > 1)
+                                            {
+                                                <button class="icon-btn small" title="Remove alternative" @onclick="() => c.Values.RemoveAt(vi)"><Icon Name="x" Size="13" /></button>
+                                            }
+                                        </div>
+                                    }
+                                </div>
+                                <button class="btn ghost small" title="Add an alternative value" @onclick="@(() => c.Values.Add(""))">or…</button>
+                            }
+                            <button class="icon-btn small" title="Remove condition" @onclick="() => rule.Conditions.Remove(c)"><Icon Name="x" Size="15" /></button>
+                        </div>
+                    }
+                    <button class="btn ghost small" @onclick="@(() => rule.Conditions.Add(new SieveCondition()))"><Icon Name="plus" Size="14" /> Add condition</button>
+
+                    <div class="sieve-section"><span>Then:</span></div>
+                    @foreach (var act in rule.Actions)
+                    {
+                        var a = act;
+                        <div class="sieve-row">
+                            <select @bind="a.Kind" aria-label="Action">
+                                @foreach (var k in Enum.GetValues<SieveActionKind>())
+                                {
+                                    <option value="@k">@ActionLabel(k)</option>
+                                }
+                            </select>
+                            @switch (a.Kind)
+                            {
+                                case SieveActionKind.FileInto or SieveActionKind.CopyTo:
+                                    <input class="grow" list="sieve-folder-list" @bind="a.Argument" @bind:event="oninput" placeholder="Folder" aria-label="Folder" />
+                                    break;
+                                case SieveActionKind.Redirect or SieveActionKind.RedirectCopy:
+                                    <input class="grow" type="email" @bind="a.Argument" @bind:event="oninput" placeholder="someone@example.org" aria-label="Address" />
+                                    break;
+                                case SieveActionKind.AddFlag:
+                                    <input class="grow" @bind="a.Argument" @bind:event="oninput" placeholder="Flag, e.g. $Important" aria-label="Flag" />
+                                    break;
+                                case SieveActionKind.Reject:
+                                    <input class="grow" @bind="a.Argument" @bind:event="oninput" placeholder="Reason sent back to the sender" aria-label="Reject message" />
+                                    break;
+                                case SieveActionKind.Vacation:
+                                    <div class="sieve-vacation">
+                                        <div class="sieve-row tight">
+                                            <input class="grow" @bind="a.VacationSubject" @bind:event="oninput" placeholder="Subject (optional)" aria-label="Reply subject" />
+                                            <label class="muted">once every
+                                                <input type="number" min="1" max="365" class="sieve-size" @bind="a.VacationDays" aria-label="Days between replies" />
+                                                days per sender</label>
+                                        </div>
+                                        <textarea rows="3" @bind="a.Argument" @bind:event="oninput" placeholder="Reply message" aria-label="Reply message"></textarea>
+                                    </div>
+                                    break;
+                            }
+                            <button class="icon-btn small" title="Remove action" @onclick="() => rule.Actions.Remove(a)"><Icon Name="x" Size="15" /></button>
+                        </div>
+                    }
+                    <button class="btn ghost small" @onclick="@(() => rule.Actions.Add(new SieveAction()))"><Icon Name="plus" Size="14" /> Add action</button>
+
+                    <label class="sieve-check">
+                        <input type="checkbox" @bind="rule.Stop" /> Don't apply later rules to matching messages
+                    </label>
+                </div>
+            }
+        </div>
+    }
+    <div>
+        <button class="btn small" @onclick="AddRule"><Icon Name="plus" Size="14" /> Add rule</button>
+    </div>
+    <datalist id="sieve-folder-list">
+        @foreach (var f in Folders)
+        {
+            <option value="@f"></option>
+        }
+    </datalist>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public List<SieveRule> Rules { get; set; } = [];
+    [Parameter] public IReadOnlyList<string> Folders { get; set; } = [];
+
+    private readonly HashSet<SieveRule> expanded = new(ReferenceEqualityComparer.Instance);
+
+    private void Toggle(SieveRule rule)
+    {
+        if (!expanded.Remove(rule)) expanded.Add(rule);
+    }
+
+    private void AddRule()
+    {
+        var rule = new SieveRule
+        {
+            Conditions = [new SieveCondition()],
+            Actions = [new SieveAction()],
+        };
+        Rules.Add(rule);
+        expanded.Add(rule);
+    }
+
+    private void Remove(SieveRule rule)
+    {
+        Rules.Remove(rule);
+        expanded.Remove(rule);
+    }
+
+    private void Move(int index, int delta)
+    {
+        var target = index + delta;
+        if (target < 0 || target >= Rules.Count) return;
+        (Rules[index], Rules[target]) = (Rules[target], Rules[index]);
+    }
+
+    private static void SetField(SieveCondition c, SieveField field)
+    {
+        var wasSize = c.Field == SieveField.Size;
+        c.Field = field;
+        c.Test = null;
+        c.AddressPart = null;
+        if (field == SieveField.Size)
+        {
+            c.Op = SieveOp.Over;
+            c.Negate = false;
+            c.Values = ["1M"];
+        }
+        else
+        {
+            if (wasSize) c.Values = [""];
+            if (!OpsFor(field).Any(o => o.Key == OpKey(c))) { c.Op = SieveOp.Contains; c.Negate = false; }
+        }
+    }
+
+    private static string MatchKey(SieveRule rule) => rule.MatchAll ? "all" : "any";
+
+    private static void SetMatch(SieveRule rule, string? key) => rule.MatchAll = key == "all";
+
+    private static string OpKey(SieveCondition c) => (c.Negate ? "!" : "") + c.Op;
+
+    private static void SetOp(SieveCondition c, string? key)
+    {
+        key ??= nameof(SieveOp.Contains);
+        c.Negate = key.StartsWith('!');
+        c.Op = Enum.Parse<SieveOp>(key.TrimStart('!'));
+        if (c.Values.Count == 0) c.Values = [""];
+    }
+
+    private static IEnumerable<(string Key, string Label)> OpsFor(SieveField field)
+    {
+        if (field == SieveField.Size)
+        {
+            yield return ("Over", "is larger than");
+            yield return ("Under", "is smaller than");
+            yield break;
+        }
+        yield return ("Contains", "contains");
+        yield return ("!Contains", "doesn't contain");
+        if (field != SieveField.Body)
+        {
+            yield return ("Is", "is");
+            yield return ("!Is", "isn't");
+            yield return ("StartsWith", "starts with");
+            yield return ("EndsWith", "ends with");
+        }
+        yield return ("Matches", "matches wildcard");
+        yield return ("!Matches", "doesn't match wildcard");
+        yield return ("Regex", "matches regex");
+        if (field != SieveField.Body)
+        {
+            yield return ("Exists", "exists");
+            yield return ("!Exists", "doesn't exist");
+        }
+    }
+
+    private static string SizeNumber(SieveCondition c) =>
+        new string((c.Values.FirstOrDefault() ?? "").TakeWhile(char.IsAsciiDigit).ToArray());
+
+    private static string SizeUnit(SieveCondition c)
+    {
+        var v = (c.Values.FirstOrDefault() ?? "").TrimEnd();
+        return v.Length > 0 && "KMG".Contains(char.ToUpperInvariant(v[^1])) ? char.ToUpperInvariant(v[^1]).ToString() : "";
+    }
+
+    private static void SetSize(SieveCondition c, string? number, string? unit) =>
+        c.Values = [(string.IsNullOrEmpty(number) ? "0" : number) + unit];
+
+    private static string Placeholder(SieveCondition c) => c.Op switch
+    {
+        SieveOp.Matches => "e.g. *@example.org",
+        SieveOp.Regex => "Regular expression",
+        _ => SieveCondition.IsAddressField(c.Field) ? "Address or part of one" : "Text",
+    };
+
+    private static string FieldLabel(SieveField f) => f switch
+    {
+        SieveField.ToOrCc => "To or Cc",
+        SieveField.ReplyTo => "Reply-To",
+        SieveField.ListId => "Mailing list (List-Id)",
+        SieveField.Header => "Other header…",
+        SieveField.Body => "Body",
+        SieveField.Size => "Size",
+        _ => f.ToString(),
+    };
+
+    private static string ActionLabel(SieveActionKind k) => k switch
+    {
+        SieveActionKind.FileInto => "Move to folder",
+        SieveActionKind.CopyTo => "Copy to folder",
+        SieveActionKind.Redirect => "Redirect to",
+        SieveActionKind.RedirectCopy => "Send a copy to",
+        SieveActionKind.MarkRead => "Mark as read",
+        SieveActionKind.Flag => "Flag (star)",
+        SieveActionKind.AddFlag => "Add flag",
+        SieveActionKind.Discard => "Delete silently",
+        SieveActionKind.Reject => "Reject with message",
+        SieveActionKind.Keep => "Keep in Inbox",
+        SieveActionKind.Vacation => "Auto-reply",
+        _ => k.ToString(),
+    };
+
+    private static string Summary(SieveRule rule)
+    {
+        var when = rule.Conditions.Count == 0
+            ? "Every message"
+            : string.Join(rule.MatchAll ? " and " : " or ", rule.Conditions.Select(DescribeCondition));
+        var then = rule.Actions.Count == 0 && !rule.Stop
+            ? "no actions"
+            : string.Join(", ", rule.Actions.Select(DescribeAction).Concat(rule.Stop ? ["stop"] : []));
+        return $"{when} → {then}";
+    }
+
+    private static string DescribeCondition(SieveCondition c)
+    {
+        var field = c.Field == SieveField.Header ? (c.HeaderName.Length > 0 ? c.HeaderName : "header") : FieldLabel(c.Field);
+        var op = OpsFor(c.Field).FirstOrDefault(o => o.Key == OpKey(c)).Label ?? c.Op.ToString();
+        if (c.Op == SieveOp.Exists) return $"{field} {op}";
+        var values = string.Join(" or ", c.Values.Where(v => v.Length > 0).Select(v => $"\"{v}\""));
+        return $"{field} {op} {(values.Length > 0 ? values : "…")}";
+    }
+
+    private static string DescribeAction(SieveAction a) => a.Kind switch
+    {
+        SieveActionKind.FileInto => $"move to {Or(a.Argument)}",
+        SieveActionKind.CopyTo => $"copy to {Or(a.Argument)}",
+        SieveActionKind.Redirect => $"redirect to {Or(a.Argument)}",
+        SieveActionKind.RedirectCopy => $"send a copy to {Or(a.Argument)}",
+        SieveActionKind.AddFlag => $"flag {Or(a.Argument)}",
+        _ => ActionLabel(a.Kind).ToLowerInvariant(),
+    };
+
+    private static string Or(string s) => s.Length > 0 ? s : "…";
+}

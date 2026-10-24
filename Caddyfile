@@ -1,0 +1,8 @@
+# Caddy reverse proxy for Nullify.WebMail.
+# The host name comes from the environment (see docker-compose.yml / .env).
+# Caddy proxies WebSockets automatically, which the Blazor Server UI needs.
+
+{$WEBMAIL_HOST} {
+	encode zstd gzip
+	reverse_proxy webmail:8080
+}

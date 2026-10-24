@@ -1,0 +1,28 @@
+@* Copyright 2026 Simon Soanes
+   SPDX-License-Identifier: Apache-2.0 *@
+@inject UserSession Session
+
+@* Shown where a PGP secret is used on a computer that was signed in by phone. The user chose that
+   route because they don't fully trust this computer; a PGP passphrase still has to be typed on
+   the device that decrypts, so say plainly what that risks. *@
+@if (Session.IsQrSession)
+{
+    <div class="alert warn" role="note">
+        <Icon Name="alert" Size="15" />
+        <div>
+            <strong>You signed in to this computer with your phone.</strong>@(" ")
+            @if (SecurityKey)
+            {
+                <span>Your security key protects the key itself, but anything you decrypt can be seen or recorded on this computer.</span>
+            }
+            else
+            {
+                <span>A passphrase typed here could be recorded by this computer, and with a copy of your key it would let someone read your encrypted mail. Only continue if you accept that, or use a key protected by a security key.</span>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public bool SecurityKey { get; set; }
+}

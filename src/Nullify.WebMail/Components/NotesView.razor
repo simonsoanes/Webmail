@@ -1,0 +1,395 @@
+@using Nullify.WebMail.Services
+@inject CalDavAccountService Dav
+@inject AppState State
+@inject IJSRuntime JS
+
+@* Notes are VJOURNALs on the CalDAV server. Same shape as Contacts: list | note, one at a time when narrow. *@
+<div class="contacts-shell">
+    <div class="contacts-grid @(DetailOpen ? "show-detail" : "")">
+        <section class="contacts-pane-list" aria-label="Notes">
+            <div class="pane-head">
+                <h2>Notes</h2>
+                @if (list != null) { <span class="muted">@list.Notes.Count</span> }
+                @if (loading) { <span class="spinner" style="color:var(--muted);" aria-label="Loading"></span> }
+                <span class="spacer"></span>
+                <button class="icon-btn" @onclick="Refresh" title="Refresh" disabled="@loading"><Icon Name="refresh" Size="17" /></button>
+                @if (status == Status.Ready && list?.Collections.Count > 0)
+                {
+                    <button class="btn accent small" @onclick="StartNew"><Icon Name="plus" Size="14" /> New</button>
+                }
+            </div>
+
+            @switch (status)
+            {
+                case Status.NotConfigured:
+                    <div class="empty-state">
+                        <div class="empty-icon"><Icon Name="notebook" Size="26" /></div>
+                        <h3>No calendar server connected</h3>
+                        <p>Notes are kept on the same server as your calendar. Set one up in Settings.</p>
+                        <button class="btn" @onclick="OpenSettings">Open settings</button>
+                    </div>
+                    break;
+                case Status.NeedsReentry:
+                    <div class="pane-pad">
+                        <div class="alert warn" role="alert">
+                            <Icon Name="lock" Size="15" />
+                            <div>Your saved CalDAV password needs to be entered again because your mail password changed.
+                                <button class="link-btn" @onclick="OpenSettings">Open settings</button></div>
+                        </div>
+                    </div>
+                    break;
+                case Status.Error:
+                    <div class="pane-pad">
+                        <div class="alert err" role="alert">
+                            <Icon Name="alert" Size="15" />
+                            <div>Couldn't load your notes: @error
+                                <button class="link-btn" @onclick="OpenSettings">Check settings</button></div>
+                        </div>
+                    </div>
+                    break;
+            }
+
+            @if (list != null && status == Status.Ready)
+            {
+                @if (list.Collections.Count == 0)
+                {
+                    <div class="empty-state">
+                        <div class="empty-icon"><Icon Name="notebook" Size="26" /></div>
+                        <h3>Nowhere to keep notes yet</h3>
+                        <p>None of your calendars on the server accept notes. Create a notes list to start.</p>
+                        <button class="btn accent" @onclick="CreateList" disabled="@creatingList">
+                            @if (creatingList) { <span class="spinner"></span> } Create a notes list
+                        </button>
+                    </div>
+                }
+                else
+                {
+                    <div class="pane-pad">
+                        @foreach (var e in list.Errors)
+                        {
+                            <div class="alert warn"><Icon Name="alert" Size="15" /><div>@e</div></div>
+                        }
+                        <div class="list-search">
+                            <Icon Name="search" Size="16" />
+                            <input @bind="query" @bind:event="oninput" placeholder="Search notes" aria-label="Search notes" />
+                            @if (query.Length > 0)
+                            {
+                                <button class="icon-btn small clear" @onclick="() => query = string.Empty" title="Clear search"><Icon Name="x" Size="15" /></button>
+                            }
+                        </div>
+                        @if (list.Collections.Count > 1)
+                        {
+                            <div class="filter-chips" role="group" aria-label="Notes lists">
+                                <button class="filter-chip @(collection == null ? "on" : "")" aria-pressed="@(collection == null)" @onclick="() => collection = null">All</button>
+                                @foreach (var c in list.Collections)
+                                {
+                                    var id = c.Id;
+                                    <button class="filter-chip @(collection == id ? "on" : "")" aria-pressed="@(collection == id)" @onclick="() => collection = id">@c.Name</button>
+                                }
+                            </div>
+                        }
+                    </div>
+
+                    var matches = Filtered().ToList();
+                    <div class="contact-rows">
+                        @if (matches.Count == 0)
+                        {
+                            <div class="empty-state">
+                                <div class="empty-icon"><Icon Name="@(query.Length > 0 ? "search" : "notebook")" Size="24" /></div>
+                                <h3>@(query.Length > 0 ? "No matches" : "No notes yet")</h3>
+                                <p>@(query.Length > 0 ? $"No note mentions \"{query}\"." : "Write your first note with New.")</p>
+                            </div>
+                        }
+                        @foreach (var n in matches)
+                        {
+                            var note = n;
+                            <button class="note-row @(selected?.Href == note.Href && !creating ? "active" : "")" @onclick="() => Select(note)">
+                                <span class="note-line">
+                                    <span class="note-title">@TitleOf(note)</span>
+                                    <span class="note-date">@When(note.Modified)</span>
+                                </span>
+                                <span class="note-snippet">@Snippet(note)</span>
+                            </button>
+                        }
+                    </div>
+                }
+            }
+        </section>
+
+        <section class="contacts-pane-detail" aria-label="Note">
+            @if (creating || selected != null)
+            {
+                <div class="pane-toolbar">
+                    <button class="icon-btn narrow-back" @onclick="Back" title="Back to notes"><Icon Name="arrow-left" /></button>
+                    @if (list?.Collections.Count > 1)
+                    {
+                        <select class="compact-select" @bind="collectionId" aria-label="Notes list">
+                            @foreach (var c in list.Collections) { <option value="@c.Id">@c.Name</option> }
+                        </select>
+                    }
+                    <span class="save-state @(Dirty ? "dirty" : "")">@(busy ? "Saving…" : Dirty ? "Unsaved changes" : creating ? "New note" : $"Saved {When(selected?.Modified)}")</span>
+                    <span class="spacer"></span>
+                    @if (!creating)
+                    {
+                        @if (confirmDelete)
+                        {
+                            <span class="delete-confirm">
+                                <button class="btn danger small" @onclick="Delete" disabled="@busy">Delete note</button>
+                                <button class="btn ghost small" @onclick="() => confirmDelete = false">Keep</button>
+                            </span>
+                        }
+                        else
+                        {
+                            <button class="icon-btn" @onclick="() => confirmDelete = true" title="Delete note" disabled="@busy"><Icon Name="trash" Size="16" /></button>
+                        }
+                    }
+                    <button class="btn accent small" @onclick="Save" disabled="@(busy || (!Dirty && !creating))" title="Save (Ctrl+Enter)">
+                        @if (busy) { <span class="spinner"></span> } Save
+                    </button>
+                </div>
+                <div class="note-editor" @onkeydown="OnEditorKey">
+                    @if (editError != null)
+                    {
+                        <div class="alert err" role="alert" style="margin:1rem 1.75rem 0;"><Icon Name="alert" Size="15" /><div>@editError</div></div>
+                    }
+                    <input class="note-title-input" @ref="titleInput" @bind="title" @bind:event="oninput" placeholder="Title" aria-label="Title" />
+                    @if (selected?.Categories.Count > 0 && !creating)
+                    {
+                        <div class="note-tags">@foreach (var c in selected.Categories) { <span class="tag">@c</span> }</div>
+                    }
+                    <textarea class="note-body-input" @bind="body" @bind:event="oninput" placeholder="Start writing…" aria-label="Note"></textarea>
+                </div>
+            }
+            else
+            {
+                <div class="empty-state">
+                    <div class="empty-icon"><Icon Name="notebook" Size="26" /></div>
+                    <h3>No note selected</h3>
+                    <p>Choose a note from the list, or write a new one.</p>
+                </div>
+            }
+        </section>
+    </div>
+</div>
+
+@code {
+    private enum Status { Loading, Ready, NotConfigured, NeedsReentry, Error }
+
+    private static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+
+    private NoteList? list;
+    private NoteItem? selected;
+    private bool creating, creatingList, busy, confirmDelete, focusTitle;
+    private string query = "";
+    private string? collection;
+    private Status status = Status.Loading;
+    private string? error, editError;
+    private bool loading;
+    private ElementReference titleInput;
+
+    // editor
+    private string title = "", body = "", collectionId = "";
+    private (string, string, string) initial;
+
+    private bool DetailOpen => selected != null || creating;
+    private bool Dirty => (title, body, collectionId) != initial;
+
+    protected override Task OnInitializedAsync() => Load(refresh: false);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!focusTitle) return;
+        focusTitle = false;
+        try { await titleInput.FocusAsync(); } catch { /* not attached */ }
+    }
+
+    private async Task Load(bool refresh)
+    {
+        loading = true;
+        try
+        {
+            list = await Dav.GetNotesAsync(State.TimeZone, refresh);
+            status = list == null ? Status.NotConfigured : Status.Ready;
+            if (collection != null && list?.Collections.All(c => c.Id != collection) != false) collection = null;
+            if (selected != null) selected = list?.Notes.FirstOrDefault(n => n.Href == selected.Href);
+        }
+        catch (InvalidOperationException)
+        {
+            status = Status.NeedsReentry;
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException)
+        {
+            status = Status.Error;
+            error = ex is TaskCanceledException ? "the server did not respond in time." : ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task Refresh()
+    {
+        if (!await ConfirmDiscard()) return;
+        await Load(refresh: true);
+        if (selected != null) Edit(selected);
+        else if (!creating) initial = (title, body, collectionId);
+    }
+
+    private async Task Select(NoteItem note)
+    {
+        if (note.Href == selected?.Href && !creating) return;
+        if (!await ConfirmDiscard()) return;
+        Edit(note);
+    }
+
+    private void Edit(NoteItem note)
+    {
+        selected = note;
+        creating = confirmDelete = false;
+        editError = null;
+        (title, body, collectionId) = (note.Title, note.Body, note.CollectionId);
+        initial = (title, body, collectionId);
+    }
+
+    private async Task StartNew()
+    {
+        if (!await ConfirmDiscard()) return;
+        selected = null;
+        creating = true;
+        confirmDelete = false;
+        editError = null;
+        title = body = "";
+        collectionId = collection ?? list?.Collections.FirstOrDefault()?.Id ?? "";
+        initial = (title, body, collectionId);
+        focusTitle = true;
+    }
+
+    private async Task Back()
+    {
+        if (!await ConfirmDiscard()) return;
+        selected = null;
+        creating = false;
+        initial = (title, body, collectionId);
+    }
+
+    private async Task<bool> ConfirmDiscard() =>
+        !Dirty || await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard your unsaved changes to this note?");
+
+    private async Task OnEditorKey(KeyboardEventArgs e)
+    {
+        if ((e.CtrlKey || e.MetaKey) && e.Key == "Enter" && !busy) await Save();
+    }
+
+    private async Task Save()
+    {
+        if (string.IsNullOrEmpty(collectionId)) { editError = "Choose a notes list."; return; }
+        if (string.IsNullOrWhiteSpace(title) && string.IsNullOrWhiteSpace(body)) { editError = "The note is empty."; return; }
+        busy = true;
+        editError = null;
+        try
+        {
+            var href = await Dav.SaveNoteAsync(creating ? null : selected, new NoteEdit(title, body), collectionId);
+            State.ShowToast(creating ? "Note added" : "Note saved");
+            var uid = selected?.Uid;
+            list = await Dav.GetNotesAsync(State.TimeZone);
+            var saved = list?.Notes.FirstOrDefault(n => n.Href == href) ?? list?.Notes.FirstOrDefault(n => n.Uid == uid);
+            if (saved != null) Edit(saved);
+            else { creating = false; selected = null; initial = (title, body, collectionId); }
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException)
+        {
+            editError = ex.Message;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            editError = ex is TaskCanceledException ? "The server did not respond in time." : $"Could not reach the server: {ex.Message}";
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task Delete()
+    {
+        if (selected == null) return;
+        busy = true;
+        try
+        {
+            await Dav.DeleteNoteAsync(selected);
+            State.ShowToast("Note deleted");
+            selected = null;
+            confirmDelete = false;
+            (title, body, collectionId) = ("", "", "");
+            initial = (title, body, collectionId);
+            list = await Dav.GetNotesAsync(State.TimeZone);
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            editError = $"Couldn't delete: {ex.Message}";
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task CreateList()
+    {
+        creatingList = true;
+        try
+        {
+            await Dav.CreateCollectionAsync("Notes", CalDavAccountService.NoteComponent);
+            State.ShowToast("Notes list created");
+            await Load(refresh: true);
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            State.ShowToast($"Couldn't create a notes list: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            creatingList = false;
+        }
+    }
+
+    private IEnumerable<NoteItem> Filtered()
+    {
+        IEnumerable<NoteItem> all = list?.Notes ?? [];
+        if (collection != null) all = all.Where(n => n.CollectionId == collection);
+        var q = query.Trim();
+        if (q.Length == 0) return all;
+        return all.Where(n =>
+            n.Title.Contains(q, StringComparison.CurrentCultureIgnoreCase)
+            || n.Body.Contains(q, StringComparison.CurrentCultureIgnoreCase)
+            || n.Categories.Any(c => c.Contains(q, StringComparison.CurrentCultureIgnoreCase)));
+    }
+
+    private static string TitleOf(NoteItem n) =>
+        n.Title.Length > 0 ? n.Title : n.Body.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() is { Length: > 0 } first ? first : "Untitled";
+
+    private static string Snippet(NoteItem n)
+    {
+        var lines = n.Body.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        // An untitled note shows its first line as the title, so the snippet starts after it.
+        var text = string.Join(" ", lines.Skip(n.Title.Length > 0 ? 0 : 1));
+        return text.Length == 0 ? "No additional text" : text.Length > 140 ? text[..140] + "…" : text;
+    }
+
+    private string When(DateTimeOffset? t)
+    {
+        if (t == null) return "";
+        var local = TimeZoneInfo.ConvertTime(t.Value, State.TimeZone).DateTime;
+        var now = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, State.TimeZone).DateTime;
+        if (local.Date == now.Date) return local.ToString("HH:mm", Inv);
+        if (local.Date == now.Date.AddDays(-1)) return "Yesterday";
+        return local.ToString(local.Year == now.Year ? "d MMM" : "d MMM yyyy", Inv);
+    }
+
+    private void OpenSettings()
+    {
+        State.ActiveTab = "settings";
+        State.NotifyStateChanged();
+    }
+}

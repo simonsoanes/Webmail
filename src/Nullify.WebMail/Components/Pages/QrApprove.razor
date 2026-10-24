@@ -1,0 +1,241 @@
+@page "/m/approve"
+@* Copyright 2026 Simon Soanes
+   SPDX-License-Identifier: Apache-2.0 *@
+@using System.Text.Json
+@using Nullify.WebMail.Controllers
+@inject IJSRuntime JS
+@inject BrandingService Branding
+
+<PageTitle>Sign in a computer · @brand WebMail</PageTitle>
+
+@* Phone half of signing in a computer by QR code (see QrLoginService). The password is typed here
+   and sent to the server; the computer only ever receives a session cookie. *@
+<div class="login-page">
+    <div class="login-card">
+        <div class="login-brand">
+            <div class="brand-mark"><Icon Name="monitor" Size="20" /></div>
+            <div>
+                <h1>Sign in a computer</h1>
+                <p>@brand WebMail</p>
+            </div>
+        </div>
+
+        @if (error != null)
+        {
+            <div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@error</div></div>
+        }
+
+        @switch (step)
+        {
+            case Step.Loading:
+                <div class="boot inline"><span class="spinner"></span> Loading…</div>
+                break;
+
+            case Step.NoRequest:
+                <p class="lead">To sign in a computer, choose <strong>Sign in with your phone</strong> on its sign-in page, then scan the code it shows.</p>
+                break;
+
+            case Step.Match:
+                <div class="qr-desktop">
+                    <Icon Name="monitor" Size="18" />
+                    <div>
+                        <strong>@describe!.Desktop</strong>
+                        <span>Computer's IP: @(describe.DesktopIp ?? "unknown") · this phone's IP: @(describe.PhoneIp ?? "unknown")</span>
+                        <span>Started @Local(describe.StartedUtc)</span>
+                    </div>
+                </div>
+                <p class="qr-question">Which number is on the computer's screen?</p>
+                <div class="qr-choices">
+                    @foreach (var c in describe.Codes)
+                    {
+                        <button type="button" class="btn" disabled="@busy" @onclick="() => Confirm(c)">@c</button>
+                    }
+                </div>
+                <p class="fine-print"><Icon Name="alert" Size="13" /><span>Only continue if you started this on a computer in front of you. If someone sent you this code or you can't see the number, close this page: picking a wrong number cancels the request.</span></p>
+                break;
+
+            case Step.Password:
+                <div class="alert warn"><Icon Name="monitor" Size="15" /><div>Signing in <strong>@describe!.Desktop</strong>. Your password stays on this phone and the server; the computer never receives it.</div></div>
+                <form @onsubmit="Approve" @onsubmit:preventDefault="true">
+                    <div class="field">
+                        <label for="username">Email address</label>
+                        <input id="username" type="text" @bind="username" @bind:event="oninput"
+                               placeholder="you@example.com" autocomplete="username" autocapitalize="off" />
+                    </div>
+                    <div class="field">
+                        <label for="password">Password</label>
+                        <input id="password" type="password" @bind="password" @bind:event="oninput"
+                               placeholder="Your mail password" autocomplete="current-password" />
+                    </div>
+                    <button type="submit" class="btn accent block" disabled="@busy">
+                        @if (busy) { <span class="spinner"></span> <span>Signing in…</span> }
+                        else { <span>Sign in the computer</span> }
+                    </button>
+                </form>
+                break;
+
+            case Step.Done:
+                <div class="alert ok"><Icon Name="check" Size="15" /><div>The computer is signed in as <strong>@approvedLogin</strong>. You can sign it out from here at any time.</div></div>
+                break;
+        }
+
+        @if (sessions.Count > 0)
+        {
+            <h2 class="qr-sessions-head">Computers you signed in from this phone</h2>
+            <ul class="qr-sessions">
+                @foreach (var s in sessions)
+                {
+                    <li>
+                        <div>
+                            <strong>@s.Desktop</strong>
+                            <span>@s.Login · @(s.DesktopIp ?? "unknown IP")</span>
+                            <span>@(s.Active ? $"Signed in until {Local(s.ExpiresUtc)}" : "Signed out")</span>
+                        </div>
+                        @if (s.Active)
+                        {
+                            <button type="button" class="btn danger" disabled="@busy" @onclick="() => Revoke(s.Token)"><Icon Name="logout" Size="15" /> Sign out</button>
+                        }
+                    </li>
+                }
+            </ul>
+        }
+    </div>
+</div>
+
+@code {
+    private enum Step { Loading, NoRequest, Match, Password, Done }
+
+    private Step step = Step.Loading;
+    private string? id;
+    private QrDescription? describe;
+    private string? phoneToken;
+    private string username = "";
+    private string password = "";
+    private string? approvedLogin;
+    private string? error;
+    private bool busy;
+    private List<QrSessionResponse> sessions = [];
+    private string brand = BrandingService.DefaultTitle;
+
+    private TimeZoneInfo zone = TimeZoneInfo.Utc;
+    private string Local(DateTimeOffset t) => TimeZoneInfo.ConvertTime(t, zone).ToString("t");
+
+    protected override async Task OnInitializedAsync()
+    {
+        try { brand = await Branding.TitleAsync(); }
+        catch { /* default title */ }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try
+        {
+            var tz = await JS.InvokeAsync<string?>("nullifyAuth.timeZone");
+            if (!string.IsNullOrEmpty(tz) && TimeZoneInfo.TryFindSystemTimeZoneById(tz, out var z)) zone = z;
+        }
+        catch { }
+        id = await JS.InvokeAsync<string?>("nullifyAuth.qrId");
+        await JS.InvokeVoidAsync("nullifyAuth.reloadOnHashChange");
+        if (string.IsNullOrEmpty(id))
+        {
+            step = Step.NoRequest;
+        }
+        else
+        {
+            var result = await Post<QrDescription>($"/api/auth/qr/{Uri.EscapeDataString(id)}/describe", new { });
+            if (result != null) { describe = result; step = Step.Match; }
+            else { step = Step.NoRequest; error = "This code has expired or was already used. Scan the new code on the computer's screen."; }
+        }
+        await LoadSessions();
+        StateHasChanged();
+    }
+
+    private async Task Confirm(int code)
+    {
+        busy = true;
+        error = null;
+        var result = await Post<QrConfirmResponse>($"/api/auth/qr/{Uri.EscapeDataString(id!)}/confirm", new { code });
+        busy = false;
+        if (result is { Success: true, PhoneToken: { } token })
+        {
+            phoneToken = token;
+            step = Step.Password;
+        }
+        else
+        {
+            step = Step.NoRequest;
+            error = result?.Error ?? "This sign-in request has expired.";
+        }
+    }
+
+    private async Task Approve()
+    {
+        error = null;
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+        {
+            error = "Username and password are required.";
+            return;
+        }
+        busy = true;
+        var result = await Post<QrApproveResponse>($"/api/auth/qr/{Uri.EscapeDataString(id!)}/approve",
+            new { phoneToken, username = username.Trim(), password });
+        busy = false;
+        password = "";
+        if (result is { Success: true, RevokeToken: { } revoke })
+        {
+            approvedLogin = result.Login;
+            step = Step.Done;
+            try { await JS.InvokeVoidAsync("nullifyAuth.qrTokens.add", revoke); } catch { }
+            // Give the computer a moment to collect its session before showing it as active.
+            await Task.Delay(1500);
+            await LoadSessions();
+        }
+        else
+        {
+            error = result?.Error ?? "Sign-in failed.";
+            if (error.StartsWith("Too many") || error.StartsWith("This sign-in request")) step = Step.NoRequest;
+        }
+    }
+
+    private async Task Revoke(string token)
+    {
+        busy = true;
+        await Post<LoginResponse>("/api/auth/qr/sessions/revoke", new { token });
+        busy = false;
+        await LoadSessions();
+    }
+
+    private async Task LoadSessions()
+    {
+        try
+        {
+            var tokens = await JS.InvokeAsync<string[]>("nullifyAuth.qrTokens.list");
+            if (tokens.Length == 0) { sessions = []; return; }
+            sessions = await Post<List<QrSessionResponse>>("/api/auth/qr/sessions", new { tokens }) ?? [];
+            // Forget tokens the server no longer knows about.
+            // Cast: a bare string[] would be taken as the params array and spread into separate arguments.
+            await JS.InvokeVoidAsync("nullifyAuth.qrTokens.save", (object)sessions.Select(s => s.Token).ToArray());
+        }
+        catch { /* the list is a convenience */ }
+    }
+
+    private async Task<T?> Post<T>(string url, object body) where T : class
+    {
+        try
+        {
+            var result = await JS.InvokeAsync<JsonElement>("nullifyAuth.postJson", url, body);
+            var status = result.GetProperty("status").GetInt32();
+            if (status == 429) { error = "Too many attempts. Wait a minute and try again."; return null; }
+            if (status == 404) return null;
+            return JsonSerializer.Deserialize<T>(result.GetProperty("text").GetString() ?? "", JsonOpts);
+        }
+        catch (Exception ex)
+        {
+            error = $"Connection error: {ex.Message}";
+            return null;
+        }
+    }
+
+    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
+}

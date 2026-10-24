@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Nullify.WebMail.Shared/Nullify.WebMail.Shared.csproj" />
+    <Project Path="src/Nullify.WebMail/Nullify.WebMail.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Nullify.WebMail.Tests/Nullify.WebMail.Tests.csproj" />
+  </Folder>
+</Solution>

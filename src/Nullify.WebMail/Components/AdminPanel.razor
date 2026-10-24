@@ -1,0 +1,385 @@
+@using Nullify.WebMail.Services
+@using Nullify.WebMail.Shared
+@inject ApiService Api
+@inject WebDavService Docs
+@inject BrandingService Branding
+@inject AppState State
+@implements IDisposable
+
+<div class="settings-page">
+    <h2>Administration</h2>
+    <p class="lead">Server-wide settings. Changes apply to all users.</p>
+
+    <section class="card">
+    <div class="card-head">
+        <div class="icon-tile"><Icon Name="pen" /></div>
+        <h3>Title</h3>
+    </div>
+    <p class="muted" style="font-size:.85rem;">
+        The name shown in place of "@BrandingService.DefaultTitle" in the sidebar, on the sign-in page and in
+        the browser tab. A domain can set its own; this one is used for the sign-in page and for any
+        domain that hasn't. Leave blank for "@BrandingService.DefaultTitle".
+    </p>
+    <div style="display:flex;gap:.4rem;">
+        <input @bind="instanceTitle" @bind:event="oninput" placeholder="@BrandingService.DefaultTitle"
+               maxlength="@BrandingService.MaxLength" style="flex:1;" />
+        <button class="btn accent" @onclick="SaveInstanceTitle" disabled="@saving">Save</button>
+    </div>
+    </section>
+
+    <section class="card">
+    <div class="card-head">
+        <div class="icon-tile"><Icon Name="server" /></div>
+        <h3>Domains</h3>
+    </div>
+    <p class="muted" style="font-size:.85rem;">
+        Map email domains to their IMAP/SMTP/Dav servers. If no domain mapping exists,
+        the global settings from appsettings.json are used. Enable domain restriction to
+        only allow logins from configured domains.
+    </p>
+
+    <div style="margin-bottom:.75rem;display:flex;align-items:center;gap:.5rem;">
+        <label style="display:flex;align-items:center;gap:.3rem;font-size:.85rem;">
+            <input type="checkbox" @bind="restrictDomains" @bind:event="oninput"
+                   @onchange="ToggleRestrict" />
+            Restrict to configured domains only
+        </label>
+    </div>
+
+    @if (domains == null)
+    {
+        <p class="muted">Loading domains...</p>
+    }
+    else
+    {
+        @foreach (var d in domains)
+        {
+            <div class="key-card" style="margin-bottom:.5rem;">
+                <div style="display:flex;align-items:center;gap:.5rem;">
+                    <span class="key-id">@@@d.Name</span>
+                    @if (!string.IsNullOrEmpty(d.ImapHost))
+                    {
+                        <span style="font-size:.8rem;color:var(--muted);">IMAP: @d.ImapHost:@(d.ImapPort ?? 993)</span>
+                    }
+                    @if (!string.IsNullOrEmpty(d.SmtpHost))
+                    {
+                        <span style="font-size:.8rem;color:var(--muted);">SMTP: @d.SmtpHost:@(d.SmtpPort ?? 587)</span>
+                    }
+                    @if (domainTitles.TryGetValue(d.Name, out var title))
+                    {
+                        <span class="tag">Title: @title</span>
+                    }
+                    @if (docsDomains.Contains(d.Name))
+                    {
+                        <span class="tag" style="background:var(--accent-soft);color:var(--accent);">Documents on</span>
+                    }
+                </div>
+                <div style="margin-top:.3rem;display:flex;gap:.3rem;">
+                    <button class="btn small" @onclick="() => EditDomain(d)">Edit</button>
+                    <button class="btn small danger" @onclick="() => DeleteDomain(d.Name)">Delete</button>
+                </div>
+            </div>
+        }
+    }
+
+    <button class="btn accent" @onclick="ShowNewDomain" style="margin-top:.5rem;">+ Add Domain</button>
+
+    @if (showEditForm)
+    {
+        <div style="margin-top:1rem;padding:1rem;border:1px solid var(--border);border-radius:var(--radius);">
+            <h3>@(editingExisting ? "Edit Domain" : "Add Domain")</h3>
+            <div class="field" style="margin-bottom:.5rem;">
+                <label>Domain Name</label>
+                <input @bind="editName" @bind:event="oninput" placeholder="example.org"
+                       disabled="@editingExisting" />
+            </div>
+            <div class="field" style="margin-bottom:.5rem;">
+                <label>Title</label>
+                <input @bind="editTitle" @bind:event="oninput" maxlength="@BrandingService.MaxLength"
+                       placeholder="@(BrandingService.Clean(instanceTitle) ?? BrandingService.DefaultTitle)" />
+            </div>
+            <h4 style="font-size:.85rem;margin:.5rem 0 .3rem;">IMAP Server</h4>
+            <div style="display:flex;gap:.4rem;margin-bottom:.4rem;">
+                <input @bind="editImapHost" @bind:event="oninput" placeholder="imap.example.org" style="flex:1;" />
+                <input @bind="editImapPort" @bind:event="oninput" placeholder="993" type="number" style="width:80px;" />
+                <select @bind="editImapSecurity" style="width:110px;">
+                    <option value="">Default</option>
+                    <option value="Tls">TLS</option>
+                    <option value="StartTls">STARTTLS</option>
+                    <option value="None">None</option>
+                </select>
+            </div>
+            <label style="font-size:.8rem;display:flex;align-items:center;gap:.3rem;margin-bottom:.5rem;">
+                <input type="checkbox" @bind="editImapAllowInvalid" />
+                Allow invalid certificates
+            </label>
+            <h4 style="font-size:.85rem;margin:.5rem 0 .3rem;">SMTP Server</h4>
+            <div style="display:flex;gap:.4rem;margin-bottom:.4rem;">
+                <input @bind="editSmtpHost" @bind:event="oninput" placeholder="smtp.example.org" style="flex:1;" />
+                <input @bind="editSmtpPort" @bind:event="oninput" placeholder="587" type="number" style="width:80px;" />
+                <select @bind="editSmtpSecurity" style="width:110px;">
+                    <option value="">Default</option>
+                    <option value="Tls">TLS</option>
+                    <option value="StartTls">STARTTLS</option>
+                    <option value="None">None</option>
+                </select>
+            </div>
+            <h4 style="font-size:.85rem;margin:.5rem 0 .3rem;">Sieve Server</h4>
+            <div style="display:flex;gap:.4rem;margin-bottom:.4rem;">
+                <input @bind="editSieveHost" @bind:event="oninput" placeholder="sieve.example.org" style="flex:1;" />
+                <input @bind="editSievePort" @bind:event="oninput" placeholder="4190" type="number" style="width:80px;" />
+            </div>
+            <h4 style="font-size:.85rem;margin:.5rem 0 .3rem;">CalDAV / CardDAV</h4>
+            <input @bind="editCalDavUrl" @bind:event="oninput" placeholder="https://dav.example.org/caldav" style="width:100%;margin-bottom:.3rem;" />
+            <input @bind="editCardDavUrl" @bind:event="oninput" placeholder="https://dav.example.org/carddav" style="width:100%;margin-bottom:.5rem;" />
+            <h4 style="font-size:.85rem;margin:.5rem 0 .3rem;">Documents (WebDAV)</h4>
+            <input @bind="editWebDavUrl" @bind:event="oninput" placeholder="https://cloud.example.org/remote.php/dav/files/{username}/" style="width:100%;margin-bottom:.3rem;" />
+            <p class="muted" style="font-size:.78rem;margin-bottom:.4rem;">
+                <code>{username}</code> is replaced with each user's WebDAV sign-in name and <code>{email}</code> with their mail address.
+                Users sign in with their calendar account's username and password unless they set their own.
+            </p>
+            <label style="font-size:.85rem;display:flex;align-items:center;gap:.5rem;margin-bottom:.75rem;">
+                <input type="checkbox" class="switch" @bind="editWebDavEnabled" />
+                Turn on Documents for every user in this domain
+            </label>
+            <div style="display:flex;gap:.4rem;">
+                <button class="btn accent" @onclick="SaveDomain" disabled="@saving">
+                    @(saving ? "Saving..." : "Save")
+                </button>
+                <button class="btn" @onclick="CancelEdit">Cancel</button>
+            </div>
+        </div>
+    }
+
+    </section>
+
+    <section class="card">
+    <div class="card-head">
+        <div class="icon-tile"><Icon Name="users" /></div>
+        <h3>Users</h3>
+    </div>
+    @if (users == null)
+    {
+        <p class="muted">Loading users...</p>
+    }
+    else
+    {
+        @foreach (var u in users)
+        {
+            <div class="setting-row">
+                <span>@u.Username @(u.IsAdmin ? "(admin)" : "")</span>
+                <button class="btn small @(u.IsAdmin ? "danger" : "")"
+                        @onclick="() => ToggleAdmin(u.Username, !u.IsAdmin)">
+                    @(u.IsAdmin ? "Remove Admin" : "Make Admin")
+                </button>
+            </div>
+        }
+    }
+
+    </section>
+
+    @if (!string.IsNullOrEmpty(status))
+    {
+        <div class="alert @(status.Contains("error", StringComparison.OrdinalIgnoreCase) ? "err" : "ok")"
+             style="margin-top:.75rem;">@status</div>
+    }
+
+    <footer class="page-footer">Copyright 2026 Simon Soanes</footer>
+</div>
+
+@code {
+    private IReadOnlyList<DomainDto>? domains;
+    private IReadOnlyList<UserDto>? users;
+    private bool restrictDomains;
+    private bool showEditForm;
+    private bool editingExisting;
+    private bool saving;
+    private string? status;
+
+    // Edit form fields
+    private string editName = "";
+    private string editImapHost = "";
+    private int editImapPort;
+    private string editImapSecurity = "";
+    private bool editImapAllowInvalid;
+    private string editSmtpHost = "";
+    private int editSmtpPort;
+    private string editSmtpSecurity = "";
+    private string editSieveHost = "";
+    private int editSievePort;
+    private string editCalDavUrl = "";
+    private string editCardDavUrl = "";
+    private string editWebDavUrl = "";
+    private bool editWebDavEnabled;
+    private string editTitle = "";
+    private HashSet<string> docsDomains = new();
+    private Dictionary<string, string> domainTitles = new();
+    private string instanceTitle = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        try
+        {
+            domains = await Api.GetDomainsAsync();
+            users = await Api.GetUsersAsync();
+            restrictDomains = await Api.GetAdminSettingAsync("restrict_domains") == "true";
+            instanceTitle = await Branding.InstanceTitleAsync() ?? "";
+            docsDomains = new();
+            domainTitles = new();
+            foreach (var d in domains)
+            {
+                if ((await Docs.DomainSettingsAsync(d.Name)).Enabled) docsDomains.Add(d.Name);
+                if (await Branding.DomainTitleAsync(d.Name) is { } title) domainTitles[d.Name] = title;
+            }
+        }
+        catch
+        {
+            domains = Array.Empty<DomainDto>();
+            users = Array.Empty<UserDto>();
+        }
+    }
+
+    private void ShowNewDomain()
+    {
+        editingExisting = false;
+        editName = "";
+        editTitle = "";
+        editImapHost = ""; editImapPort = 0; editImapSecurity = "";
+        editImapAllowInvalid = false;
+        editSmtpHost = ""; editSmtpPort = 0; editSmtpSecurity = "";
+        editSieveHost = ""; editSievePort = 0;
+        editCalDavUrl = ""; editCardDavUrl = "";
+        editWebDavUrl = ""; editWebDavEnabled = false;
+        showEditForm = true;
+    }
+
+    private async Task EditDomain(DomainDto d)
+    {
+        var (docsOn, docsUrl) = await Docs.DomainSettingsAsync(d.Name);
+        editWebDavEnabled = docsOn;
+        editWebDavUrl = docsUrl ?? "";
+        editingExisting = true;
+        editName = d.Name;
+        editTitle = domainTitles.GetValueOrDefault(d.Name) ?? "";
+        editImapHost = d.ImapHost ?? ""; editImapPort = d.ImapPort ?? 0; editImapSecurity = d.ImapSecurity?.ToString() ?? "";
+        editImapAllowInvalid = d.ImapAllowInvalidCertificates;
+        editSmtpHost = d.SmtpHost ?? ""; editSmtpPort = d.SmtpPort ?? 0; editSmtpSecurity = d.SmtpSecurity?.ToString() ?? "";
+        editSieveHost = d.SieveHost ?? ""; editSievePort = d.SievePort ?? 0;
+        editCalDavUrl = d.CalDavUrl ?? ""; editCardDavUrl = d.CardDavUrl ?? "";
+        showEditForm = true;
+    }
+
+    private void CancelEdit()
+    {
+        showEditForm = false;
+    }
+
+    private async Task SaveDomain()
+    {
+        if (string.IsNullOrWhiteSpace(editName)) { status = "Domain name is required."; return; }
+        saving = true;
+        try
+        {
+            var dto = new DomainDto(
+                editName.Trim().ToLowerInvariant(),
+                string.IsNullOrWhiteSpace(editImapHost) ? null : editImapHost.Trim(),
+                editImapPort > 0 ? editImapPort : null,
+                Enum.TryParse<MailSecurity>(editImapSecurity, out var ims) ? ims : null,
+                editImapAllowInvalid,
+                string.IsNullOrWhiteSpace(editSmtpHost) ? null : editSmtpHost.Trim(),
+                editSmtpPort > 0 ? editSmtpPort : null,
+                Enum.TryParse<MailSecurity>(editSmtpSecurity, out var sms) ? sms : null,
+                string.IsNullOrWhiteSpace(editSieveHost) ? null : editSieveHost.Trim(),
+                editSievePort > 0 ? editSievePort : null,
+                string.IsNullOrWhiteSpace(editCalDavUrl) ? null : editCalDavUrl.Trim(),
+                string.IsNullOrWhiteSpace(editCardDavUrl) ? null : editCardDavUrl.Trim(),
+                DateTime.UtcNow);
+
+            if (editingExisting)
+                await Api.UpdateDomainAsync(editName, dto);
+            else
+                await Api.CreateDomainAsync(dto);
+            await Docs.SetDomainSettingsAsync(dto.Name, editWebDavEnabled, editWebDavUrl);
+            await Branding.SetDomainTitleAsync(dto.Name, editTitle);
+            await RefreshBrand();
+
+            status = "Domain saved.";
+            showEditForm = false;
+            await LoadData();
+        }
+        catch (Exception ex)
+        {
+            status = $"Error: {ex.Message}";
+        }
+        finally { saving = false; }
+    }
+
+    private async Task DeleteDomain(string name)
+    {
+        try
+        {
+            await Api.DeleteDomainAsync(name);
+            await Branding.SetDomainTitleAsync(name, null);
+            await RefreshBrand();
+            status = "Domain deleted.";
+            await LoadData();
+        }
+        catch (Exception ex)
+        {
+            status = $"Error: {ex.Message}";
+        }
+    }
+
+    private async Task SaveInstanceTitle()
+    {
+        saving = true;
+        try
+        {
+            await Branding.SetInstanceTitleAsync(instanceTitle);
+            instanceTitle = BrandingService.Clean(instanceTitle) ?? "";
+            await RefreshBrand();
+            status = "Title saved.";
+        }
+        catch (Exception ex)
+        {
+            status = $"Error: {ex.Message}";
+        }
+        finally { saving = false; }
+    }
+
+    /// <summary>Show a changed title in this admin's own sidebar straight away.</summary>
+    private async Task RefreshBrand()
+    {
+        State.BrandTitle = await Branding.TitleAsync();
+        State.NotifyStateChanged();
+    }
+
+    private async Task ToggleRestrict()
+    {
+        try
+        {
+            await Api.SetAdminSettingAsync("restrict_domains", restrictDomains ? "true" : "false");
+        }
+        catch { /* ignore */ }
+    }
+
+    private async Task ToggleAdmin(string username, bool isAdmin)
+    {
+        try
+        {
+            await Api.SetUserAdminAsync(username, isAdmin);
+            await LoadData();
+        }
+        catch (Exception ex)
+        {
+            status = $"Error: {ex.Message}";
+        }
+    }
+
+    public void Dispose() { }
+}

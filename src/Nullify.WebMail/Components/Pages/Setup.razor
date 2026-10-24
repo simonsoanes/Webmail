@@ -1,0 +1,181 @@
+@using System.Text.Json
+@using Nullify.WebMail.Services
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+
+<div class="login-page">
+    <div class="login-card wide">
+        <div class="login-brand">
+            <div class="brand-mark"><Icon Name="mail" Size="20" /></div>
+            <div>
+                <h1>Welcome to Nullify WebMail</h1>
+                <p>First-time setup</p>
+            </div>
+        </div>
+        <p class="lead">
+            This server has no accounts yet. Sign in against your mail server to create the
+            administrator account. A domain mapping is created so other users of your domain
+            reach the same servers.
+        </p>
+
+        @if (!string.IsNullOrEmpty(error))
+        {
+            <div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@error</div></div>
+        }
+
+        <form @onsubmit="DoSetup" @onsubmit:preventDefault="true">
+            <div class="field">
+                <label for="setup-email">Email address</label>
+                <input id="setup-email" type="email" @bind="email" @bind:event="oninput" @onblur="GuessHosts"
+                       placeholder="admin@example.org" autocomplete="username" autofocus />
+            </div>
+            <div class="field">
+                <label for="setup-password">Password</label>
+                <input id="setup-password" type="password" @bind="password" @bind:event="oninput"
+                       placeholder="Your IMAP password" autocomplete="current-password" />
+            </div>
+
+            <div class="form-section">
+                <h3><Icon Name="inbox" Size="16" /> Incoming mail (IMAP)</h3>
+                <div class="field">
+                    <label for="imap-host">Server</label>
+                    <input id="imap-host" type="text" @bind="imapHost" @bind:event="oninput" placeholder="imap.example.org" />
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="imap-port">Port</label>
+                        <input id="imap-port" type="number" @bind="imapPort" @bind:event="oninput" />
+                    </div>
+                    <div class="field">
+                        <label for="imap-sec">Security</label>
+                        <select id="imap-sec" @bind="imapSecurity" @bind:after="ImapSecurityChanged">
+                            <option value="Tls">TLS</option>
+                            <option value="StartTls">STARTTLS</option>
+                            <option value="None">None (insecure)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h3><Icon Name="send" Size="16" /> Outgoing mail (SMTP) <small>optional</small></h3>
+                <div class="field">
+                    <label for="smtp-host">Server</label>
+                    <input id="smtp-host" type="text" @bind="smtpHost" @bind:event="oninput" placeholder="smtp.example.org" />
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="smtp-port">Port</label>
+                        <input id="smtp-port" type="number" @bind="smtpPort" @bind:event="oninput" />
+                    </div>
+                    <div class="field">
+                        <label for="smtp-sec">Security</label>
+                        <select id="smtp-sec" @bind="smtpSecurity" @bind:after="SmtpSecurityChanged">
+                            <option value="StartTls">STARTTLS</option>
+                            <option value="Tls">TLS</option>
+                            <option value="None">None (insecure)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <button type="submit" class="btn accent block" disabled="@loading" style="margin-top:.5rem;">
+                @if (loading) { <span class="spinner"></span> <span>Verifying credentials…</span> }
+                else { <span>Complete setup</span> }
+            </button>
+        </form>
+
+        <div class="fine-print">
+            <Icon Name="lock" Size="13" />
+            <span>Your password is verified against the IMAP server and kept only in this server's memory while you're signed in. It's never stored on disk or sent back to your browser.</span>
+        </div>
+    </div>
+</div>
+
+@code {
+    private string email = "";
+    private string password = "";
+    private string imapHost = "";
+    private int imapPort = 993;
+    private string imapSecurity = "Tls";
+    private string smtpHost = "";
+    private int smtpPort = 587;
+    private string smtpSecurity = "StartTls";
+    private string? error;
+    private bool loading;
+
+    // Pre-fill server names from the address domain; the user can still override them.
+    private void GuessHosts()
+    {
+        var at = email.IndexOf('@');
+        if (at < 0 || at == email.Length - 1) return;
+        var domain = email[(at + 1)..].Trim();
+        if (string.IsNullOrEmpty(imapHost)) imapHost = "imap." + domain;
+        if (string.IsNullOrEmpty(smtpHost)) smtpHost = "smtp." + domain;
+    }
+
+    private void ImapSecurityChanged() => imapPort = imapSecurity == "Tls" ? 993 : 143;
+    private void SmtpSecurityChanged() => smtpPort = smtpSecurity == "Tls" ? 465 : smtpSecurity == "StartTls" ? 587 : 25;
+
+    private async Task DoSetup()
+    {
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(email) || !email.Contains('@'))
+        {
+            error = "Please enter a valid email address (e.g. admin@example.org).";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            error = "Password is required.";
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(imapHost))
+        {
+            error = "IMAP server host is required.";
+            return;
+        }
+
+        loading = true;
+        try
+        {
+            var result = await JS.InvokeAsync<JsonElement>(
+                "nullifyAuth.postJson", "/api/auth/setup",
+                new
+                {
+                    username = email.Trim(),
+                    password,
+                    imapHost = imapHost.Trim(),
+                    imapPort,
+                    imapSecurity,
+                    smtpHost = smtpHost.Trim(),
+                    smtpPort,
+                    smtpSecurity,
+                });
+
+            var ok = result.GetProperty("ok").GetBoolean();
+            var text = result.GetProperty("text").GetString() ?? "";
+            if (ok)
+            {
+                // Full reload: browser now holds the auth cookie.
+                Nav.NavigateTo("/", forceLoad: true);
+                return;
+            }
+
+            LoginResponse? resp = null;
+            try { resp = JsonSerializer.Deserialize<LoginResponse>(text, JsonOpts); } catch { }
+            error = resp?.Error ?? $"Setup failed (HTTP {result.GetProperty("status").GetInt32()}).";
+        }
+        catch (Exception ex)
+        {
+            error = $"Connection error: {ex.Message}";
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
+}

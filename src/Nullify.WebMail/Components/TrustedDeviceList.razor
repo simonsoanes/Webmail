@@ -1,0 +1,71 @@
+@* Copyright 2026 Simon Soanes
+   SPDX-License-Identifier: Apache-2.0 *@
+@inject TrustedDeviceService TrustedDevices
+@inject UserSession Session
+@inject AppState State
+
+@* Computers that keep this account's login (see TrustedDeviceService), with a way to revoke each. *@
+<div class="trusted-devices">
+    <h4>Trusted computers</h4>
+    @if (devices == null)
+    {
+        <p class="muted"><span class="spinner"></span></p>
+    }
+    else if (devices.Count == 0)
+    {
+        <p class="muted">None. To stay signed in on a computer that's yours, tick <strong>I trust this computer</strong> when you sign in.</p>
+    }
+    else
+    {
+        <p class="muted">These computers keep your password, encrypted with a key only this server has, so they stay signed in. Remove any you no longer use or don't recognise.</p>
+        <ul class="device-list">
+            @foreach (var d in devices)
+            {
+                <li>
+                    <Icon Name="monitor" Size="16" />
+                    <div>
+                        <strong>@d.Name @if (d.DeviceId == Session.TrustedDeviceId) { <span class="tag">This computer</span> }</strong>
+                        <span>Added @Local(d.CreatedUtc) · last signed in @Local(d.LastUsedUtc) · until @Local(d.ExpiresUtc) unless used</span>
+                    </div>
+                    <button class="btn small danger" disabled="@busy" @onclick="() => Remove(d)">Remove</button>
+                </li>
+            }
+        </ul>
+    }
+</div>
+
+@code {
+    private List<TrustedDeviceInfo>? devices;
+    private bool busy;
+
+    protected override async Task OnInitializedAsync() => await Load();
+
+    private async Task Load()
+    {
+        if (Session.Credential == null) return;
+        devices = await TrustedDevices.ListAsync(Session.Credential.Login);
+    }
+
+    private async Task Remove(TrustedDeviceInfo d)
+    {
+        busy = true;
+        try
+        {
+            // Removing this computer ends this session too; Home sends the browser to sign-in.
+            await TrustedDevices.RevokeAsync(Session.Credential!.Login, d.DeviceId);
+            State.ShowToast($"{d.Name} is no longer trusted");
+            await Load();
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Could not remove it: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private string Local(DateTime utc) =>
+        TimeZoneInfo.ConvertTime(new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)), State.TimeZone).ToString("d MMM yyyy");
+}

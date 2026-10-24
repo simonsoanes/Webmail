@@ -1,0 +1,281 @@
+@using Nullify.WebMail.Services
+@inject IJSRuntime JS
+@inject PgpBrowser Pgp
+
+<form class="contact-editor" @onsubmit="Save" @onsubmit:preventDefault="true">
+    <div class="editor-head">
+        <h3>@(Contact == null ? "New contact" : "Edit contact")</h3>
+    </div>
+
+    <div class="field-row">
+        <div class="field">
+            <label for="ce-given">First name</label>
+            <input id="ce-given" @ref="firstInput" @bind="given" @bind:event="oninput" autocomplete="off" />
+        </div>
+        <div class="field">
+            <label for="ce-family">Last name</label>
+            <input id="ce-family" @bind="family" @bind:event="oninput" autocomplete="off" />
+        </div>
+    </div>
+    <div class="field-row">
+        <div class="field">
+            <label for="ce-org">Company</label>
+            <input id="ce-org" @bind="org" @bind:event="oninput" autocomplete="off" />
+        </div>
+        <div class="field">
+            <label for="ce-title">Job title</label>
+            <input id="ce-title" @bind="title" @bind:event="oninput" autocomplete="off" />
+        </div>
+    </div>
+
+    <fieldset class="multi-field">
+        <legend>Email</legend>
+        @for (var i = 0; i < emails.Count; i++)
+        {
+            var row = emails[i];
+            <div class="multi-row">
+                <select @bind="row.Label" aria-label="Email label">
+                    @foreach (var l in LabelOptions(EmailLabels, row.Label)) { <option value="@l">@l</option> }
+                </select>
+                <input type="email" @bind="row.Value" @bind:event="oninput" placeholder="name@example.com" aria-label="Email address" />
+                <button type="button" class="icon-btn small" @onclick="() => emails.Remove(row)" title="Remove"><Icon Name="x" Size="15" /></button>
+            </div>
+        }
+        <button type="button" class="link-btn" @onclick='() => emails.Add(new Row(emails.Count == 0 ? "Work" : "Home"))'>+ Add email</button>
+    </fieldset>
+
+    <fieldset class="multi-field">
+        <legend>Phone</legend>
+        @for (var i = 0; i < phones.Count; i++)
+        {
+            var row = phones[i];
+            <div class="multi-row">
+                <select @bind="row.Label" aria-label="Phone label">
+                    @foreach (var l in LabelOptions(PhoneLabels, row.Label)) { <option value="@l">@l</option> }
+                </select>
+                <input type="tel" @bind="row.Value" @bind:event="oninput" placeholder="+44 7700 900123" aria-label="Phone number" />
+                <button type="button" class="icon-btn small" @onclick="() => phones.Remove(row)" title="Remove"><Icon Name="x" Size="15" /></button>
+            </div>
+        }
+        <button type="button" class="link-btn" @onclick='() => phones.Add(new Row("Mobile"))'>+ Add phone</button>
+    </fieldset>
+
+    <div class="field-row">
+        <div class="field">
+            <label for="ce-bday">Birthday</label>
+            <input id="ce-bday" type="date" @bind="birthday" />
+        </div>
+        @if (Contact == null && AddressBooks.Count > 1)
+        {
+            <div class="field">
+                <label for="ce-book">Address book</label>
+                <select id="ce-book" @bind="bookId">
+                    @foreach (var b in AddressBooks) { <option value="@b.Id">@b.Name</option> }
+                </select>
+            </div>
+        }
+    </div>
+    <div class="field">
+        <label for="ce-note">Notes</label>
+        <textarea id="ce-note" rows="4" @bind="note" @bind:event="oninput"></textarea>
+    </div>
+
+    <fieldset class="multi-field">
+        <legend>OpenPGP key</legend>
+        @if (keyInfo != null && keyText.Length > 0)
+        {
+            <div class="key-chip">
+                <span class="key-uid">@(keyInfo.PrimaryUserId ?? "Public key")</span>
+                <code>@PgpFormat.Fingerprint(keyInfo.Fingerprint)</code>
+                <span class="muted" style="font-size:.78rem;">
+                    @keyInfo.Algorithm · @(keyInfo.Expires is { } x ? (keyInfo.Expired ? $"expired {x:d MMM yyyy}" : $"expires {x:d MMM yyyy}") : "no expiry")
+                    @if (!keyInfo.CanEncrypt) { <span> · can't be used for encryption</span> }
+                </span>
+            </div>
+            <div style="display:flex;gap:.4rem;margin-top:.4rem;">
+                <button type="button" class="link-btn" @onclick="() => { keyText = string.Empty; keyInfo = null; keyChanged = true; }">Remove key</button>
+            </div>
+        }
+        else
+        {
+            <textarea rows="3" class="mono-input" value="@keyText" @onchange="KeyPasted" spellcheck="false"
+                      placeholder="Paste their public key (-----BEGIN PGP PUBLIC KEY BLOCK-----)" aria-label="OpenPGP public key"></textarea>
+            <label class="btn small file-picker" style="margin-top:.4rem;">
+                <Icon Name="upload" Size="14" /> Choose key file
+                <InputFile OnChange="KeyFile" accept=".asc,.gpg,.pgp,.key,application/pgp-keys" />
+            </label>
+            @if (keyError != null) { <p class="help" style="color:var(--danger);">@keyError</p> }
+        }
+    </fieldset>
+
+    @if (error != null)
+    {
+        <div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@error</div></div>
+    }
+
+    <div class="editor-actions">
+        @if (Contact != null && OnDelete.HasDelegate)
+        {
+            <button type="button" class="btn danger" @onclick="Delete" disabled="@busy"><Icon Name="trash" Size="15" /> Delete</button>
+        }
+        <span class="spacer"></span>
+        <button type="button" class="btn" @onclick="Cancel" disabled="@busy">Cancel</button>
+        <button type="submit" class="btn accent" disabled="@busy">
+            @if (busy) { <span class="spinner"></span> } Save
+        </button>
+    </div>
+</form>
+
+@code {
+    [Parameter] public ContactInfo? Contact { get; set; }
+    [Parameter] public IReadOnlyList<CalendarInfo> AddressBooks { get; set; } = [];
+    /// <summary>Returns an error message to show, or null on success.</summary>
+    [Parameter] public Func<ContactEdit, string?, Task<string?>>? OnSave { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+    [Parameter] public EventCallback OnDelete { get; set; }
+
+    private static readonly string[] EmailLabels = ["Work", "Home", "Other"];
+    private static readonly string[] PhoneLabels = ["Mobile", "Work", "Home", "Main", "Fax", "Other"];
+
+    private sealed class Row(string label, string value = "")
+    {
+        public string Label { get; set; } = label;
+        public string Value { get; set; } = value;
+    }
+
+    private string given = "", family = "", org = "", title = "", note = "";
+    private DateOnly? birthday;
+    private string? bookId;
+    private List<Row> emails = new(), phones = new();
+    private string? error;
+    private bool busy;
+    private string initial = "";
+    private ElementReference firstInput;
+
+    protected override void OnInitialized()
+    {
+        var c = Contact;
+        given = c?.GivenName ?? "";
+        family = c?.FamilyName ?? "";
+        org = c?.Organization ?? "";
+        title = c?.Title ?? "";
+        note = c?.Note ?? "";
+        birthday = ParseBirthday(c?.Birthday);
+        emails = c?.Emails.Select(e => new Row(e.Label ?? "Other", e.Value)).ToList() ?? [new Row("Work")];
+        phones = c?.Phones.Select(p => new Row(p.Label ?? "Other", p.Value)).ToList() ?? [];
+        bookId = AddressBooks.FirstOrDefault()?.Id;
+        initial = Snapshot();
+    }
+
+    // OpenPGP public key (vCard KEY)
+    private string keyText = "";
+    private PgpKeyInfo? keyInfo;
+    private string? keyError;
+    private bool keyChanged;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try { await firstInput.FocusAsync(); } catch { /* not attached yet */ }
+        if (Contact?.PublicKey is { } existing)
+        {
+            keyText = existing;
+            try { keyInfo = (await Pgp.InspectAsync(existing)).FirstOrDefault(); }
+            catch (PgpException ex) { keyError = $"The saved key can't be read: {ex.Message}"; }
+            StateHasChanged();
+        }
+    }
+
+    private Task KeyPasted(ChangeEventArgs e) => UseKey(e.Value?.ToString() ?? "");
+
+    private async Task KeyFile(InputFileChangeEventArgs e)
+    {
+        try
+        {
+            await using var s = e.File.OpenReadStream(512 * 1024);
+            using var ms = new MemoryStream();
+            await s.CopyToAsync(ms);
+            var bytes = ms.ToArray();
+            await UseKey(bytes.Length > 0 && bytes[0] == '-' ? System.Text.Encoding.UTF8.GetString(bytes) : OpenPgpArmor.Armor("PGP PUBLIC KEY BLOCK", bytes));
+        }
+        catch (IOException ex) { keyError = $"Couldn't read the file: {ex.Message}"; }
+    }
+
+    private async Task UseKey(string armored)
+    {
+        keyError = null;
+        if (string.IsNullOrWhiteSpace(armored)) return;
+        try
+        {
+            var info = (await Pgp.InspectAsync(armored)).FirstOrDefault() ?? throw new PgpException("No key found.");
+            if (info.IsSecret)
+            {
+                keyError = "That's a secret key. Never share it — paste the person's public key instead.";
+                return;
+            }
+            keyText = await Pgp.PublicOfAsync(armored);
+            keyInfo = info;
+            keyChanged = true;
+        }
+        catch (PgpException ex) { keyError = ex.Message; }
+    }
+
+    /// <summary>The preset labels, plus the contact's own custom label if it has one.</summary>
+    private static IEnumerable<string> LabelOptions(string[] presets, string current) =>
+        presets.Contains(current) ? presets : presets.Prepend(current);
+
+    private static DateOnly? ParseBirthday(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var s = raw.Length >= 10 ? raw[..10] : raw;
+        return DateOnly.TryParseExact(s, ["yyyy-MM-dd", "yyyyMMdd"], System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out var d) ? d : null;
+    }
+
+    private string Snapshot() => string.Join("|", given, family, org, title, note, birthday, keyChanged,
+        string.Join(",", emails.Select(e => e.Label + e.Value)), string.Join(",", phones.Select(p => p.Label + p.Value)));
+
+    private async Task Save()
+    {
+        error = null;
+        var cleanEmails = emails.Where(e => e.Value.Trim().Length > 0).ToList();
+        if (cleanEmails.FirstOrDefault(e => !e.Value.Contains('@') || e.Value.Trim().Contains(' ')) is { } bad)
+        {
+            error = $"\"{bad.Value}\" doesn't look like an email address.";
+            return;
+        }
+        if (given.Trim().Length + family.Trim().Length + org.Trim().Length == 0 && cleanEmails.Count == 0)
+        {
+            error = "Give the contact a name, company or email address.";
+            return;
+        }
+        var edit = new ContactEdit(given, family, org, title,
+            cleanEmails.Select(e => new ContactValue(e.Value.Trim(), e.Label)).ToList(),
+            phones.Where(p => p.Value.Trim().Length > 0).Select(p => new ContactValue(p.Value.Trim(), p.Label)).ToList(),
+            birthday?.ToString("yyyy-MM-dd"), note)
+        {
+            PublicKey = keyChanged ? keyText : null,
+        };
+
+        busy = true;
+        try
+        {
+            if (OnSave != null) error = await OnSave(edit, bookId);
+        }
+        finally { busy = false; }
+    }
+
+    private async Task Cancel()
+    {
+        if (Snapshot() != initial && !await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard your changes to this contact?")) return;
+        await OnCancel.InvokeAsync();
+    }
+
+    private async Task Delete()
+    {
+        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Delete {Contact?.FullName} from your address book? This can't be undone.")) return;
+        busy = true;
+        try { await OnDelete.InvokeAsync(); }
+        finally { busy = false; }
+    }
+}

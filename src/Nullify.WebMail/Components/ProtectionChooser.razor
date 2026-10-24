@@ -1,0 +1,53 @@
+@* How a secret key should be protected: a passphrase, or a security key (WebAuthn PRF). *@
+
+<fieldset class="protection-chooser">
+    <legend>Protect the key with</legend>
+    <div class="segmented" role="radiogroup">
+        @if (AllowKeep)
+        {
+            <button type="button" role="radio" aria-checked="@(Choice == Option.Keep)" class="@(Choice == Option.Keep ? "on" : "")" @onclick="() => Set(Option.Keep)">Its current passphrase</button>
+        }
+        <button type="button" role="radio" aria-checked="@(Choice == Option.Passphrase)" class="@(Choice == Option.Passphrase ? "on" : "")" @onclick="() => Set(Option.Passphrase)"><Icon Name="lock" Size="14" /> @(AllowKeep ? "A new passphrase" : "A passphrase")</button>
+        @if (!PassphraseOnly)
+        {
+            <button type="button" role="radio" aria-checked="@(Choice == Option.SecurityKey)" class="@(Choice == Option.SecurityKey ? "on" : "")"
+                    @onclick="() => Set(Option.SecurityKey)" disabled="@(!SecurityKeyAvailable)"
+                    title="@(SecurityKeyAvailable ? "" : "Needs a secure (https) connection and a browser with WebAuthn")"><Icon Name="shield" Size="14" /> A security key</button>
+        }
+    </div>
+    @if (Choice == Option.Passphrase)
+    {
+        <div class="field-row" style="margin-top:.6rem;">
+            @* Deliberately unbound: the browser reads these (PgpBrowser), so the passphrase never reaches the server. *@
+            <div class="field"><label for="pc-1">Passphrase</label><input id="pc-1" type="password" @ref="passInput" autocomplete="new-password" /></div>
+            <div class="field"><label for="pc-2">Repeat it</label><input id="pc-2" type="password" @ref="confirmInput" autocomplete="new-password" /></div>
+        </div>
+        <p class="help">Only you know it: it's never sent to the server, and it can't be recovered if forgotten.</p>
+    }
+    else if (Choice == Option.SecurityKey)
+    {
+        <p class="help" style="margin-top:.6rem;">
+            You'll be asked to touch your security key (for example a YubiKey 5) or use a passkey. The key is encrypted
+            with a secret only that device can produce, so you'll touch it again whenever the key is unlocked.
+            It's tied to this site's address; make a passphrase-protected backup too.
+        </p>
+    }
+</fieldset>
+
+@code {
+    public enum Option { Keep, Passphrase, SecurityKey }
+
+    [Parameter] public Option Choice { get; set; }
+    [Parameter] public EventCallback<Option> ChoiceChanged { get; set; }
+    [Parameter] public bool SecurityKeyAvailable { get; set; }
+    [Parameter] public bool AllowKeep { get; set; }
+    [Parameter] public bool PassphraseOnly { get; set; }
+
+    private ElementReference passInput, confirmInput;
+
+    /// <summary>The new-passphrase inputs, for the browser to read; null unless a passphrase is being chosen.</summary>
+    public ElementReference? PassphraseInput => Choice == Option.Passphrase ? passInput : null;
+    public ElementReference? ConfirmInput => Choice == Option.Passphrase ? confirmInput : null;
+
+    private Task Set(Option o) => ChoiceChanged.InvokeAsync(o);
+}

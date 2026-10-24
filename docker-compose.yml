@@ -1,0 +1,40 @@
+# Nullify.WebMail behind Caddy (automatic HTTPS).
+# Copy .env.example to .env and set your host name, then: docker compose up -d --build
+services:
+  webmail:
+    build: .
+    image: nullify-webmail:latest
+    container_name: nullify-webmail
+    restart: unless-stopped
+    # Only reachable through Caddy.
+    expose:
+      - "8080"
+    volumes:
+      - webmail-data:/data
+    environment:
+      - PublicUrl=https://${WEBMAIL_HOST:-mail.example.com}
+      - TZ=UTC
+      # Trust X-Forwarded-* from Caddy on the Docker network (ASP.NET Core only trusts loopback by default).
+      - ReverseProxy__KnownNetworks=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+
+  caddy:
+    image: caddy:2
+    container_name: nullify-webmail-caddy
+    restart: unless-stopped
+    depends_on:
+      - webmail
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - WEBMAIL_HOST=${WEBMAIL_HOST:-mail.example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  webmail-data:
+  caddy-data:
+  caddy-config:

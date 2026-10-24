@@ -1,0 +1,324 @@
+@using System.Text.Json
+@using Nullify.WebMail.Services
+@inject UserSession UserSession
+@inject ApiService Api
+@inject AppState State
+@inject MailActions Actions
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+@implements IDisposable
+
+<div class="brand">
+    <div class="brand-mark"><Icon Name="mail" Size="17" /></div>
+    <div class="brand-text">@State.BrandTitle<small>WebMail</small></div>
+    <span class="spacer"></span>
+    <button class="icon-btn small rail-toggle" @onclick="ToggleRail" title="Collapse or expand sidebar">
+        <Icon Name="sidebar" Size="16" />
+    </button>
+</div>
+
+<button class="btn accent compose-btn" @onclick="Compose" title="Compose (c)"><Icon Name="pen" Size="16" /> <span class="label">Compose</span></button>
+
+<div class="folder-list">
+    <div class="nav-section">
+        <div class="nav-label">
+            <span>Folders</span>
+            <span class="btn-group">
+                <button class="icon-btn" @onclick="Refresh" title="Refresh folders"><Icon Name="refresh" Size="13" /></button>
+                <button class="icon-btn" @onclick="StartNewFolder" title="New folder"><Icon Name="plus" Size="14" /></button>
+            </span>
+        </div>
+
+        @if (showNewFolder)
+        {
+            <div class="inline-form">
+                <input @ref="newFolderInput" @bind="newFolderName" @bind:event="oninput" placeholder="Folder name"
+                       @onkeydown="OnNewFolderKey" />
+                <button class="btn small accent" @onclick="CreateFolder">Add</button>
+            </div>
+        }
+
+        @if (!string.IsNullOrEmpty(loadError))
+        {
+            <div class="alert err sidebar-error">
+                <Icon Name="alert" Size="15" />
+                <div>Mail server unreachable.<br /><small>@loadError</small><br />
+                    <button class="btn small" style="margin-top:.4rem;" @onclick="Refresh">Retry</button></div>
+            </div>
+        }
+        else if (State.Folders.Count == 0 && loading)
+        {
+            @for (var i = 0; i < 5; i++)
+            {
+                <div class="nav-item"><div class="skeleton line" style="width:@(50 + i * 8)%;"></div></div>
+            }
+        }
+        else
+        {
+            @foreach (var folder in MailFormat.OrderFolders(State.Folders))
+            {
+                var f = folder;
+                var active = State.ActiveTab == "mail" && State.SelectedFolder == f.Name;
+                var depth = MailFormat.FolderDepth(f);
+                @if (renaming == f.Name)
+                {
+                    <div class="inline-form" style="padding-left:@(0.6 + depth * 0.9)rem;">
+                        <input @bind="renameValue" @bind:event="oninput" @onkeydown="e => OnRenameKey(e, f)" />
+                        <button class="btn small accent" @onclick="() => Rename(f)">Save</button>
+                    </div>
+                    continue;
+                }
+                <div class="nav-item @(active ? "active" : "") @(dropTarget == f.Name ? "drop-target" : "")"
+                     style="padding-left:@(0.6 + depth * 0.9)rem;" role="button" tabindex="0"
+                     title="@f.Name"
+                     @onclick="() => SelectFolder(f.Name)"
+                     @ondragenter="() => dropTarget = f.Name"
+                     @ondragleave="() => { if (dropTarget == f.Name) dropTarget = null; }"
+                     @ondragover:preventDefault="true"
+                     @ondrop="() => Drop(f.Name)">
+                    <Icon Name="@MailFormat.FolderIcon(f)" Size="17" />
+                    <span class="label">@MailFormat.FolderLeaf(f)</span>
+                    @if (f.UnreadMessages > 0 && f.SpecialUse is not ("Sent" or "Trash" or "Drafts"))
+                    {
+                        <span class="count">@f.UnreadMessages</span>
+                    }
+                    else if (f.SpecialUse == "Drafts" && f.TotalMessages > 0)
+                    {
+                        <span class="count muted">@f.TotalMessages</span>
+                    }
+                    @if (f.SpecialUse == null)
+                    {
+                        <span class="folder-actions" @onclick:stopPropagation="true">
+                            <button class="icon-btn" title="Rename" @onclick="() => StartRename(f)"><Icon Name="pen" Size="13" /></button>
+                            <button class="icon-btn" title="Delete folder" @onclick="() => DeleteFolder(f)"><Icon Name="trash" Size="13" /></button>
+                        </span>
+                    }
+                </div>
+            }
+        }
+    </div>
+</div>
+
+<nav class="sidebar-nav">
+    @foreach (var (tab, icon, label) in Tabs())
+    {
+        <button class="nav-item @(State.ActiveTab == tab ? "active" : "")" @onclick="() => SetTab(tab)" title="@label">
+            <Icon Name="@icon" Size="17" />
+            <span class="label">@label</span>
+        </button>
+    }
+</nav>
+
+<div class="user-chip">
+    @{ var me = MailFormat.ParseAddress(State.Session?.Email); }
+    <button class="user-link" @onclick='() => SetTab("settings")' title="Account settings">
+        <span class="avatar sm" style="--hue:@MailFormat.AvatarHue(me)">@MailFormat.Initials(me)</span>
+        <span class="who">
+            <strong>@State.Session?.Email</strong>
+            <span>@(UserSession.QrSessionExpiresUtc is { } until ? $"Signed in by phone until {TimeZoneInfo.ConvertTime(until, State.TimeZone):t}" : State.IsAdmin ? "Administrator" : "Signed in")</span>
+        </span>
+    </button>
+    <button class="icon-btn small" @onclick="Logout" title="Sign out"><Icon Name="logout" Size="16" /></button>
+</div>
+
+@code {
+    [Parameter] public EventCallback OnNavigate { get; set; }
+
+    private bool loading = true;
+    private string? loadError;
+    private bool showNewFolder;
+    private string newFolderName = "";
+    private ElementReference newFolderInput;
+    private string? renaming;
+    private string renameValue = "";
+    private string? dropTarget;
+    private int loadedVersion = -1;
+
+    private IEnumerable<(string Tab, string Icon, string Label)> Tabs()
+    {
+        yield return ("mail", "mail", "Mail");
+        yield return ("calendar", "calendar", "Calendar");
+        yield return ("tasks", "tasks", "Tasks");
+        yield return ("contacts", "users", "Contacts");
+        yield return ("notes", "notebook", "Notes");
+        if (State.DocumentsAvailable) yield return ("documents", "hard-drive", "Documents");
+        yield return ("settings", "settings", "Settings");
+        if (State.IsAdmin) yield return ("admin", "shield", "Admin");
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        State.StateChanged += OnStateChanged;
+        await Refresh();
+    }
+
+    private async void OnStateChanged() => await InvokeAsync(async () =>
+    {
+        if (State.FoldersVersion != loadedVersion) await Refresh();
+        StateHasChanged();
+    });
+
+    private async Task Refresh()
+    {
+        loadedVersion = State.FoldersVersion;
+        loading = true;
+        try
+        {
+            State.Folders = await Api.GetFoldersAsync();
+            loadError = null;
+        }
+        catch (Exception ex)
+        {
+            loadError = ex.InnerException?.Message ?? ex.Message;
+        }
+        loading = false;
+        StateHasChanged();
+    }
+
+    private async Task SelectFolder(string name)
+    {
+        State.ActiveTab = "mail";
+        State.SelectedFolder = name;
+        State.SelectedMessageUid = null;
+        State.ShowCompose = false;
+        State.CheckedUids.Clear();
+        State.NotifyStateChanged();
+        await OnNavigate.InvokeAsync();
+    }
+
+    private async Task SetTab(string tab)
+    {
+        State.ActiveTab = tab;
+        State.ShowCompose = false;
+        if (tab != "mail") State.SelectedMessageUid = null;
+        State.NotifyStateChanged();
+        await OnNavigate.InvokeAsync();
+    }
+
+    private async Task Compose()
+    {
+        State.ActiveTab = "mail";
+        State.StartCompose(ComposeMode.New);
+        await OnNavigate.InvokeAsync();
+    }
+
+    private async Task Drop(string folder)
+    {
+        dropTarget = null;
+        var uids = State.DraggingUids;
+        State.DraggingUids = Array.Empty<long>();
+        if (uids.Count == 0 || folder == State.SelectedFolder) return;
+        State.CheckedUids.Clear();
+        await Actions.MoveAsync(uids, folder);
+    }
+
+    // ---- folder management ----
+
+    private async Task StartNewFolder()
+    {
+        showNewFolder = !showNewFolder;
+        if (showNewFolder)
+        {
+            StateHasChanged();
+            await Task.Yield();
+            try { await newFolderInput.FocusAsync(); } catch { }
+        }
+    }
+
+    private async Task OnNewFolderKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await CreateFolder();
+        else if (e.Key == "Escape") showNewFolder = false;
+    }
+
+    private async Task CreateFolder()
+    {
+        var name = newFolderName.Trim();
+        if (name.Length == 0) return;
+        try
+        {
+            await Api.CreateFolderAsync(name);
+            State.ShowToast($"Folder \"{name}\" created");
+            newFolderName = "";
+            showNewFolder = false;
+            await Refresh();
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Could not create folder: {ex.InnerException?.Message ?? ex.Message}", isError: true);
+        }
+    }
+
+    private void StartRename(FolderInfo f)
+    {
+        renaming = f.Name;
+        renameValue = MailFormat.FolderLeaf(f);
+    }
+
+    private async Task OnRenameKey(KeyboardEventArgs e, FolderInfo f)
+    {
+        if (e.Key == "Enter") await Rename(f);
+        else if (e.Key == "Escape") renaming = null;
+    }
+
+    private async Task Rename(FolderInfo f)
+    {
+        var leaf = renameValue.Trim();
+        renaming = null;
+        if (leaf.Length == 0 || leaf == MailFormat.FolderLeaf(f)) return;
+        // Keep the folder under the same parent.
+        var cut = string.IsNullOrEmpty(f.Delimiter) ? -1 : f.Name.LastIndexOf(f.Delimiter[0]);
+        var newName = cut < 0 ? leaf : f.Name[..(cut + 1)] + leaf;
+        try
+        {
+            await Api.RenameFolderAsync(f.Name, newName);
+            if (State.SelectedFolder == f.Name) State.SelectedFolder = newName;
+            State.ShowToast($"Renamed to \"{leaf}\"");
+            await Refresh();
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Rename failed: {ex.InnerException?.Message ?? ex.Message}", isError: true);
+        }
+    }
+
+    private async Task DeleteFolder(FolderInfo f)
+    {
+        var label = MailFormat.FolderLeaf(f);
+        var warning = f.TotalMessages > 0 ? $" and its {f.TotalMessages} message(s)" : "";
+        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Delete the folder \"{label}\"{warning}? This cannot be undone.")) return;
+        try
+        {
+            await Api.DeleteFolderAsync(f.Name);
+            if (State.SelectedFolder == f.Name)
+            {
+                State.SelectedFolder = "INBOX";
+                State.SelectedMessageUid = null;
+            }
+            State.ShowToast($"Folder \"{label}\" deleted");
+            await Refresh();
+            State.NotifyStateChanged();
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Could not delete folder: {ex.InnerException?.Message ?? ex.Message}", isError: true);
+        }
+    }
+
+    private async Task ToggleRail()
+    {
+        try { await JS.InvokeVoidAsync("nullifyApp.toggleSidebar"); } catch { /* circuit gone */ }
+    }
+
+    private async Task Logout()
+    {
+        try
+        {
+            await JS.InvokeAsync<JsonElement>("nullifyAuth.postJson", "/api/auth/logout", new { });
+        }
+        catch { /* even if the call fails, drop the local view */ }
+        Nav.NavigateTo("/", forceLoad: true);
+    }
+
+    public void Dispose() => State.StateChanged -= OnStateChanged;
+}

@@ -1,0 +1,29 @@
+<div class="shortcut-grid">
+    @foreach (var (keys, label) in Shortcuts)
+    {
+        <div>
+            <span>@label</span>
+            <span>@foreach (var k in keys) { <kbd>@k</kbd> }</span>
+        </div>
+    }
+</div>
+
+@code {
+    private static readonly (string[] Keys, string Label)[] Shortcuts =
+    [
+        (["j"], "Next message"),
+        (["k"], "Previous message"),
+        (["c"], "Compose"),
+        (["r"], "Reply"),
+        (["a"], "Reply all"),
+        (["f"], "Forward"),
+        (["e"], "Archive"),
+        (["#"], "Delete"),
+        (["s"], "Star / unstar"),
+        (["u"], "Toggle read"),
+        (["/"], "Search"),
+        (["Esc"], "Close"),
+        (["Ctrl", "Enter"], "Send"),
+        (["?"], "Show shortcuts"),
+    ];
+}

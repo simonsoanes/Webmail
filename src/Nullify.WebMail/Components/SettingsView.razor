@@ -1,0 +1,529 @@
+@using System.Text.Json
+@using Nullify.WebMail.Services
+@inject ApiService Api
+@inject AppState State
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+@inject CalDavAccountService CalDav
+@inject WebDavService Docs
+
+<div class="settings-page">
+    <h2>Settings</h2>
+    <p class="lead">Preferences are saved to your account and apply on every device.</p>
+
+    <section class="card">
+        <div class="card-head">
+            <div class="icon-tile"><Icon Name="sun" /></div>
+            <div><h3>Appearance</h3><p>Stored in this browser.</p></div>
+        </div>
+        <div class="setting-row">
+            <label>Theme</label>
+            <div class="segmented" role="radiogroup" aria-label="Theme">
+                @foreach (var (value, icon, label) in Themes)
+                {
+                    <button role="radio" aria-checked="@(theme == value)" class="@(theme == value ? "on" : "")"
+                            @onclick="() => SetTheme(value)">
+                        <Icon Name="@icon" Size="14" /> @label
+                    </button>
+                }
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        <div class="card-head">
+            <div class="icon-tile"><Icon Name="pen" /></div>
+            <div><h3>Compose</h3><p>Used for new messages, replies and forwards.</p></div>
+        </div>
+        <div class="setting-row">
+            <div>
+                <label for="compose-font">Editor font</label>
+                <div class="desc">Monospace keeps plain-text tables and code aligned.</div>
+            </div>
+            <select id="compose-font" @bind="composeFont">
+                <option value="sans-serif">Sans-serif</option>
+                <option value="monospace">Monospace</option>
+            </select>
+        </div>
+        <div class="setting-stack">
+            <label for="signature">Signature</label>
+            <textarea id="signature" @bind="signature" @bind:event="oninput" rows="4"
+                      placeholder="Added below your message, after a “-- ” separator"></textarea>
+        </div>
+        <div class="card-actions">
+            <button class="btn accent" @onclick="SavePrefs" disabled="@saving">
+                @(saving ? "Saving…" : "Save changes")
+            </button>
+        </div>
+    </section>
+
+    <section class="card">
+        <div class="card-head">
+            <div class="icon-tile"><Icon Name="calendar" /></div>
+            <div><h3>Calendar &amp; contacts</h3><p>One CalDAV/CardDAV account for your calendar, tasks, notes and contacts. Leave any field blank to use the default shown.</p></div>
+        </div>
+
+        @if (dav == null)
+        {
+            <p class="muted">Loading…</p>
+        }
+        else
+        {
+            @if (dav.PasswordSource == DavPasswordSource.NeedsReentry)
+            {
+                <div class="alert warn" role="alert">
+                    <Icon Name="lock" Size="15" />
+                    <div>Your mail password has changed since your CalDAV password was saved, so it can no longer be unlocked.
+                        Enter it again, or save with the field blank to use your mail password.</div>
+                </div>
+            }
+            <div class="field">
+                <label for="dav-url">Server URL</label>
+                <input id="dav-url" type="url" @bind="davUrl" @bind:event="oninput" autocomplete="off" spellcheck="false"
+                       placeholder="@(dav.DefaultUrl ?? "https://dav.example.org/")" />
+                <span class="help">
+                    @(dav.DefaultUrl != null ? $"Default for your domain: {dav.DefaultUrl}." : "Your administrator hasn't set a default, so a URL is required.")
+                    The server's root address is fine; calendars are discovered automatically.
+                </span>
+            </div>
+            <div class="field-row">
+                <div class="field">
+                    <label for="dav-user">Username</label>
+                    <input id="dav-user" type="text" @bind="davUser" @bind:event="oninput" autocomplete="off" spellcheck="false"
+                           placeholder="@dav.MailLogin" />
+                </div>
+                <div class="field">
+                    <label for="dav-pass">Password</label>
+                    <input id="dav-pass" type="password" @bind="davPassword" @bind:event="oninput" autocomplete="new-password"
+                           placeholder="@(dav.PasswordSource == DavPasswordSource.Saved ? "•••••••• saved; type to replace" : "Same as your mail password")" />
+                </div>
+            </div>
+            <div class="fine-print" style="margin-top:0;">
+                <Icon Name="lock" Size="13" />
+                <span>
+                    @if (dav.PasswordSource == DavPasswordSource.Saved)
+                    {
+                        <text>Using a separate saved password. </text>
+                        <button class="link-btn" @onclick="UseMailPassword" disabled="@davBusy">Use my mail password instead</button>
+                        <text>. </text>
+                    }
+                    else if (dav.PasswordSource == DavPasswordSource.NeedsReentry)
+                    {
+                        <text>Your saved password needs to be entered again. </text>
+                    }
+                    else
+                    {
+                        <text>Using your mail password. </text>
+                    }
+                    A separate password is encrypted with a key derived from your current mail password and is never
+                    shown again. If your mail password changes you'll be asked to re-enter it.
+                </span>
+            </div>
+
+            @if (davTest != null)
+            {
+                <div class="alert @(davTest.Success ? "ok" : "err")" style="margin-top:.9rem;" role="status">
+                    <Icon Name="@(davTest.Success ? "check" : "alert")" Size="15" />
+                    <div>
+                        @davTest.Message
+                        @if (davTest.Calendars.Count > 0 || davTest.AddressBooks?.Count > 0)
+                        {
+                            <div class="calendar-chips">
+                                @foreach (var c in davTest.Calendars)
+                                {
+                                    <span class="chip"><Icon Name="calendar" Size="12" /> <span>@c</span></span>
+                                }
+                                @foreach (var b in davTest.AddressBooks ?? [])
+                                {
+                                    <span class="chip"><Icon Name="users" Size="12" /> <span>@b</span></span>
+                                }
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+
+            <div class="card-actions">
+                @if (HasCustomDav)
+                {
+                    <button class="btn ghost" @onclick="ResetDav" disabled="@davBusy" style="margin-right:auto;">Reset to defaults</button>
+                }
+                <button class="btn" @onclick="TestDav" disabled="@davBusy">
+                    @if (davTesting) { <span class="spinner"></span> } else { <Icon Name="refresh" Size="15" /> }
+                    Test connection
+                </button>
+                <button class="btn accent" @onclick="SaveDav" disabled="@davBusy">Save</button>
+            </div>
+        }
+    </section>
+
+    <section class="card" id="documents-settings">
+        <div class="card-head">
+            <div class="icon-tile"><Icon Name="hard-drive" /></div>
+            <div><h3>Documents (WebDAV)</h3><p>Browse and share files from a WebDAV storage account, such as Nextcloud or ownCloud.</p></div>
+        </div>
+
+        @if (docs == null)
+        {
+            <p class="muted">Loading…</p>
+        }
+        else
+        {
+            @if (docs.EnabledByDomain)
+            {
+                <div class="notice"><Icon Name="shield" Size="15" /><span>Your administrator has turned Documents on for everyone at your domain.</span></div>
+            }
+            else
+            {
+                <div class="setting-row" style="padding-top:0;">
+                    <div>
+                        <label for="docs-enabled">Show Documents</label>
+                        <div class="desc">Adds Documents to the menu.</div>
+                    </div>
+                    <input id="docs-enabled" type="checkbox" class="switch" @bind="docsEnabled" />
+                </div>
+            }
+
+            @if (docsEnabled || docs.EnabledByDomain)
+            {
+                @if (docs.PasswordSource == DavPasswordSource.NeedsReentry)
+                {
+                    <div class="alert warn" role="alert">
+                        <Icon Name="lock" Size="15" />
+                        <div>Your mail password has changed since your Documents password was saved, so it can no longer be unlocked.
+                            Enter it again, or save with the field blank to use your calendar account's password.</div>
+                    </div>
+                }
+                <div class="field">
+                    <label for="docs-url">Server URL</label>
+                    <input id="docs-url" type="url" @bind="docsUrl" @bind:event="oninput" autocomplete="off" spellcheck="false"
+                           placeholder="@(docs.DefaultUrl ?? "https://cloud.example.org/remote.php/dav/files/you/")" />
+                    <span class="help">
+                        @(docs.DefaultUrl != null ? $"Default for your domain: {docs.DefaultUrl}." : "Your administrator hasn't set a default, so a URL is required.")
+                        Use the folder you want Documents to open at.
+                    </span>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="docs-user">Username</label>
+                        <input id="docs-user" type="text" @bind="docsUser" @bind:event="oninput" autocomplete="off" spellcheck="false"
+                               placeholder="@docs.DefaultUsername" />
+                    </div>
+                    <div class="field">
+                        <label for="docs-pass">Password</label>
+                        <input id="docs-pass" type="password" @bind="docsPassword" @bind:event="oninput" autocomplete="new-password"
+                               placeholder="@DocsPasswordPlaceholder" />
+                    </div>
+                </div>
+                <div class="fine-print" style="margin-top:0;">
+                    <Icon Name="lock" Size="13" />
+                    <span>
+                        @if (docs.PasswordSource == DavPasswordSource.Saved)
+                        {
+                            <text>Using a separate saved password. </text>
+                            <button class="link-btn" @onclick="DocsUseDefaultPassword" disabled="@docsBusy">Use the calendar account's password instead</button>
+                            <text>. </text>
+                        }
+                        else if (docs.PasswordSource == DavPasswordSource.MailPassword)
+                        {
+                            <text>Using the same username and password as your calendar &amp; contacts account. </text>
+                        }
+                        A separate password is encrypted with a key derived from your current mail password, and must be re-entered if that changes.
+                    </span>
+                </div>
+
+                @if (docsTest != null)
+                {
+                    <div class="alert @(docsTest.Success ? "ok" : "err")" style="margin-top:.9rem;" role="status">
+                        <Icon Name="@(docsTest.Success ? "check" : "alert")" Size="15" />
+                        <div>@docsTest.Message</div>
+                    </div>
+                }
+            }
+
+            <div class="card-actions">
+                @if (docs.Url != null || docs.Username != null || docs.PasswordSource != DavPasswordSource.MailPassword)
+                {
+                    <button class="btn ghost" @onclick="DocsReset" disabled="@docsBusy" style="margin-right:auto;">Reset to defaults</button>
+                }
+                @if (docsEnabled || docs.EnabledByDomain)
+                {
+                    <button class="btn" @onclick="DocsTest" disabled="@docsBusy">
+                        @if (docsTesting) { <span class="spinner"></span> } else { <Icon Name="refresh" Size="15" /> }
+                        Test connection
+                    </button>
+                }
+                <button class="btn accent" @onclick="DocsSave" disabled="@docsBusy">Save</button>
+            </div>
+        }
+    </section>
+
+    <section class="card">
+        <div class="card-head">
+            <div class="icon-tile"><Icon Name="filter" /></div>
+            <div><h3>Filters</h3><p>Server-side Sieve scripts run on delivery, even when you are offline.</p></div>
+        </div>
+        @if (showSieve)
+        {
+            <SieveEditor />
+        }
+        else
+        {
+            <button class="btn" @onclick="() => showSieve = true"><Icon Name="code" Size="15" /> Open filter editor</button>
+        }
+    </section>
+
+    <section class="card" id="pgp-settings">
+        <div class="card-head">
+            <div class="icon-tile"><Icon Name="key" /></div>
+            <div><h3>Encryption (OpenPGP)</h3><p>Sign and encrypt mail end to end. Keys are unlocked and used only in your browser.</p></div>
+        </div>
+        <PgpKeyManager />
+    </section>
+
+    <section class="card">
+        <div class="card-head">
+            <div class="icon-tile"><Icon Name="keyboard" /></div>
+            <div><h3>Keyboard shortcuts</h3><p>Available while you are not typing in a field.</p></div>
+        </div>
+        <ShortcutList />
+    </section>
+
+    <section class="card">
+        <div class="card-head">
+            <div class="icon-tile"><Icon Name="user" /></div>
+            <div><h3>Account</h3><p>Signed in as <strong>@State.Session?.Email</strong></p></div>
+        </div>
+        <TrustedDeviceList />
+        <button class="btn danger" @onclick="Logout"><Icon Name="logout" Size="15" /> Sign out</button>
+    </section>
+
+    <footer class="page-footer">
+        <span>Copyright 2026 Simon Soanes</span>
+        <a class="footer-link" href="https://github.com/simonsoanes/Webmail" target="_blank" rel="noopener noreferrer" title="Source code on GitHub">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
+            <span>GitHub</span>
+        </a>
+    </footer>
+</div>
+
+@code {
+    private static readonly (string Value, string Icon, string Label)[] Themes =
+        [("system", "monitor", "System"), ("light", "sun", "Light"), ("dark", "moon", "Dark")];
+
+    private string theme = "system";
+    private string composeFont = "sans-serif";
+    private string signature = "";
+    private bool saving;
+    private bool showSieve;
+
+    private CalDavSettingsDto? dav;
+    private string davUrl = "", davUser = "", davPassword = "";
+    private CalDavTestResult? davTest;
+    private bool davBusy, davTesting;
+
+    private bool HasCustomDav => dav != null &&
+        (dav.Url != null || dav.Username != null || dav.PasswordSource != DavPasswordSource.MailPassword);
+
+    protected override async Task OnInitializedAsync()
+    {
+        composeFont = State.ComposeFont;
+        signature = State.Signature;
+        await LoadDav();
+        await LoadDocs();
+    }
+
+    private async Task LoadDav()
+    {
+        try
+        {
+            dav = await CalDav.GetSettingsAsync();
+            davUrl = dav.Url ?? "";
+            davUser = dav.Username ?? "";
+            davPassword = "";
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Could not load calendar settings: {ex.Message}", isError: true);
+        }
+    }
+
+    private async Task TestDav()
+    {
+        davBusy = davTesting = true;
+        davTest = null;
+        try { davTest = await CalDav.TestAsync(davUrl, davUser, davPassword); }
+        finally { davBusy = davTesting = false; }
+    }
+
+    private async Task SaveDav()
+    {
+        davBusy = true;
+        try
+        {
+            await CalDav.SaveAsync(davUrl, davUser, davPassword, useMailPassword: false);
+            State.ShowToast("Calendar settings saved");
+            davTest = null;
+            await LoadDav();
+        }
+        catch (FormatException ex) { State.ShowToast(ex.Message, isError: true); }
+        catch (Exception ex) { State.ShowToast($"Could not save calendar settings: {ex.Message}", isError: true); }
+        finally { davBusy = false; }
+    }
+
+    private async Task UseMailPassword()
+    {
+        davBusy = true;
+        try
+        {
+            await CalDav.SaveAsync(davUrl, davUser, null, useMailPassword: true);
+            State.ShowToast("CalDAV will use your mail password");
+            await LoadDav();
+        }
+        finally { davBusy = false; }
+    }
+
+    private async Task ResetDav()
+    {
+        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", "Remove your CalDAV settings and use the server defaults?")) return;
+        davBusy = true;
+        try
+        {
+            await CalDav.ResetAsync();
+            davTest = null;
+            State.ShowToast("Calendar settings reset to defaults");
+            await LoadDav();
+        }
+        finally { davBusy = false; }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try
+        {
+            theme = await JS.InvokeAsync<string>("nullifyApp.getTheme");
+            StateHasChanged();
+        }
+        catch { /* keep default */ }
+    }
+
+    private async Task SetTheme(string value)
+    {
+        theme = value;
+        await JS.InvokeVoidAsync("nullifyApp.setTheme", value);
+    }
+
+    private async Task SavePrefs()
+    {
+        saving = true;
+        try
+        {
+            await Api.SetPreferenceAsync("compose.font", composeFont);
+            await Api.SetPreferenceAsync("compose.signature", signature);
+            State.ComposeFont = composeFont;
+            State.Signature = signature;
+            State.ShowToast("Preferences saved");
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Could not save preferences: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            saving = false;
+        }
+    }
+
+    private async Task Logout()
+    {
+        try
+        {
+            await JS.InvokeAsync<JsonElement>("nullifyAuth.postJson", "/api/auth/logout", new { });
+        }
+        catch { /* even if the call fails, drop the local view */ }
+        Nav.NavigateTo("/", forceLoad: true);
+    }
+
+    // ---- Documents (WebDAV) ----
+
+    private DocumentsSettingsDto? docs;
+    private bool docsEnabled;
+    private string docsUrl = "", docsUser = "", docsPassword = "";
+    private CalDavTestResult? docsTest;
+    private bool docsBusy, docsTesting;
+
+    private string DocsPasswordPlaceholder => docs?.PasswordSource == DavPasswordSource.Saved
+        ? "•••••••• saved; type to replace"
+        : docs?.CalDavPasswordIsSeparate == true ? "Same as your calendar password" : "Same as your mail password";
+
+    private async Task LoadDocs()
+    {
+        try
+        {
+            docs = await Docs.GetSettingsAsync();
+            docsEnabled = docs.Enabled;
+            docsUrl = docs.Url ?? "";
+            docsUser = docs.Username ?? "";
+            docsPassword = "";
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Could not load Documents settings: {ex.Message}", isError: true);
+        }
+    }
+
+    private async Task DocsTest()
+    {
+        docsBusy = docsTesting = true;
+        docsTest = null;
+        try { docsTest = await Docs.TestAsync(docsUrl, docsUser, docsPassword); }
+        finally { docsBusy = docsTesting = false; }
+    }
+
+    private async Task DocsSave()
+    {
+        docsBusy = true;
+        try
+        {
+            await Docs.SaveAsync(docsEnabled, docsUrl, docsUser, docsPassword, useDefaultPassword: false);
+            await AfterDocsChange("Documents settings saved");
+        }
+        catch (FormatException ex) { State.ShowToast(ex.Message, isError: true); }
+        catch (Exception ex) { State.ShowToast($"Could not save Documents settings: {ex.Message}", isError: true); }
+        finally { docsBusy = false; }
+    }
+
+    private async Task DocsUseDefaultPassword()
+    {
+        docsBusy = true;
+        try
+        {
+            await Docs.SaveAsync(docsEnabled, docsUrl, docsUser, null, useDefaultPassword: true);
+            await AfterDocsChange("Documents will use your calendar account's password");
+        }
+        finally { docsBusy = false; }
+    }
+
+    private async Task DocsReset()
+    {
+        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", "Remove your Documents server settings and use the defaults?")) return;
+        docsBusy = true;
+        try
+        {
+            await Docs.ResetAsync();
+            await AfterDocsChange("Documents settings reset to defaults");
+        }
+        finally { docsBusy = false; }
+    }
+
+    private async Task AfterDocsChange(string message)
+    {
+        State.ShowToast(message);
+        docsTest = null;
+        await LoadDocs();
+        try { State.DocumentsAvailable = await Docs.IsAvailableAsync(); }
+        catch { State.DocumentsAvailable = false; }
+        State.NotifyStateChanged();
+    }
+}

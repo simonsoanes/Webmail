@@ -1,0 +1,67 @@
+@page "/"
+@using Nullify.WebMail.Services
+@inject UserSession Session
+@inject ApiService Api
+@inject AppState State
+@inject MemoryTicketStore Tickets
+@inject NavigationManager Nav
+@implements IDisposable
+
+@if (!ready)
+{
+    <div class="boot"><span class="spinner"></span> Loading…</div>
+}
+else if (needsSetup)
+{
+    <Setup />
+}
+else if (!Session.IsAuthenticated)
+{
+    <Login />
+}
+else
+{
+    <Mail />
+}
+
+@code {
+    private bool ready;
+    private bool needsSetup;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Runs during prerender (from the request's user) and again when the circuit
+        // starts (from the circuit's authentication state); both resolve the session
+        // from the server's in-memory ticket store.
+        await Session.CaptureAsync();
+
+        State.IsAuthenticated = Session.IsAuthenticated;
+        State.IsAdmin = Session.IsAdmin;
+        if (Session.Credential != null)
+            State.Session = new SessionInfo(Session.Credential.Login, Session.Credential.Login, Session.Credential.Login);
+
+        needsSetup = !Session.IsAuthenticated && !await Api.HasUsersAsync();
+        State.NotifyStateChanged();
+        ready = true;
+
+        if (Session.SessionId != null) Tickets.SessionEnded += OnSessionEnded;
+    }
+
+    // A session revoked from elsewhere (the phone that signed in this computer, or the trusted
+    // computers list) or past its time limit: the ticket is already gone, so
+    // stop using the credential here too, send the browser back to sign-in, then end the circuit
+    // in case the page ignores the navigation.
+    private void OnSessionEnded(string sessionId)
+    {
+        if (sessionId != Session.SessionId) return;
+        Session.End();
+        _ = InvokeAsync(async () =>
+        {
+            try { Nav.NavigateTo("/?error=" + Uri.EscapeDataString("This computer was signed out."), forceLoad: true); } catch { }
+            await Task.Delay(TimeSpan.FromSeconds(3));
+            await DispatchExceptionAsync(new InvalidOperationException("The session has ended."));
+        });
+    }
+
+    public void Dispose() => Tickets.SessionEnded -= OnSessionEnded;
+}

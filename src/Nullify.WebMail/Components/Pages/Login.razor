@@ -1,0 +1,168 @@
+@using System.Text.Json
+@using Nullify.WebMail.Services
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+@inject TrustedDeviceService TrustedDevices
+@inject BrandingService Branding
+
+<PageTitle>@brand WebMail</PageTitle>
+
+<div class="login-page">
+    <div class="login-card">
+        <div class="login-brand">
+            <div class="brand-mark"><Icon Name="mail" Size="20" /></div>
+            <div>
+                <h1>@brand WebMail</h1>
+                <p>Sign in with your mail account</p>
+            </div>
+        </div>
+
+        @if (!string.IsNullOrEmpty(error))
+        {
+            <div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@error</div></div>
+        }
+
+        @if (byPhone)
+        {
+            <QrSignIn />
+            <button type="button" class="btn block login-alt" @onclick="() => byPhone = false">Type your password on this computer instead</button>
+        }
+        else
+        {
+        <form @onsubmit="DoLogin" @onsubmit:preventDefault="true">
+            <div class="field">
+                <label for="username">Email address</label>
+                <input id="username" type="text" @bind="username" @bind:event="oninput"
+                       placeholder="you@example.com" autocomplete="username" autofocus />
+            </div>
+            <div class="field">
+                <label for="password">Password</label>
+                <div class="password-wrap">
+                    <input id="password" type="@(showPassword ? "text" : "password")" @bind="password" @bind:event="oninput"
+                           placeholder="Your mail password" autocomplete="current-password" />
+                    <button type="button" class="icon-btn small" @onclick="() => showPassword = !showPassword"
+                            title="@(showPassword ? "Hide password" : "Show password")">
+                        <Icon Name="@(showPassword ? "eye-off" : "eye")" Size="15" />
+                    </button>
+                </div>
+            </div>
+            <label class="check-row trust-row">
+                <input type="checkbox" @bind="trustDevice" />
+                <span>
+                    I trust this computer
+                    <small>Stay signed in for @TrustedDevices.Lifetime.TotalDays days, even after the server restarts. This browser keeps your password, encrypted with a key only the server has. Only for a computer that's yours.</small>
+                </span>
+            </label>
+            <button type="submit" class="btn accent block" disabled="@loading">
+                @if (loading) { <span class="spinner"></span> <span>Signing in…</span> }
+                else { <span>Sign in</span> }
+            </button>
+        </form>
+
+        <div class="login-divider"><span>or</span></div>
+        <button type="button" class="btn block" @onclick="() => { byPhone = true; error = null; }">
+            <Icon Name="smartphone" Size="16" /> <span>Sign in with your phone</span>
+        </button>
+        <p class="help login-alt-help">For a computer you don't fully trust: your password is typed on your phone instead.</p>
+
+        <div class="fine-print">
+            <Icon Name="lock" Size="13" />
+            @if (trustDevice)
+            {
+                <span>Your password is checked by your mail server. This browser keeps a copy that only this server can decrypt, until you sign out or remove this computer in Settings.</span>
+            }
+            else
+            {
+                <span>Your password is checked by your mail server and kept only in this server's memory while you're signed in. It's never stored on disk or sent back to your browser.</span>
+            }
+        </div>
+        }
+    </div>
+
+    <footer class="page-footer">
+        <a class="footer-link" href="https://github.com/simonsoanes/Webmail" target="_blank" rel="noopener noreferrer" title="Source code on GitHub">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
+            <span>Nullify WebMail</span>
+        </a>
+    </footer>
+</div>
+
+@code {
+    private string username = "";
+    private string password = "";
+    private string? error;
+    private bool loading;
+    private bool showPassword;
+    private bool byPhone;
+    private bool trustDevice;
+    private string brand = BrandingService.DefaultTitle;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try { brand = await Branding.TitleAsync(); }
+        catch { /* default title */ }
+    }
+
+    protected override void OnInitialized()
+    {
+        // Surface failures redirected back from server endpoints (?error=...).
+        var query = new Uri(Nav.Uri).Query;
+        if (!string.IsNullOrEmpty(query))
+        {
+            var parsed = System.Web.HttpUtility.ParseQueryString(query);
+            error = parsed["error"]?.Replace('+', ' ');
+        }
+    }
+
+    private async Task DoLogin()
+    {
+        error = null;
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+        {
+            error = "Username and password are required.";
+            return;
+        }
+
+        loading = true;
+        try
+        {
+            // Real browser fetch: the Set-Cookie response lands in the browser jar,
+            // which a server-side HttpClient loopback can never do.
+            var result = await JS.InvokeAsync<JsonElement>(
+                "nullifyAuth.postJson", "/api/auth/login",
+                new { username = username.Trim(), password, trustDevice });
+
+            var ok = result.GetProperty("ok").GetBoolean();
+            var text = result.GetProperty("text").GetString() ?? "";
+
+            if (ok)
+            {
+                LoginResponse? resp = null;
+                try { resp = JsonSerializer.Deserialize<LoginResponse>(text, JsonOpts); } catch { }
+                if (resp is { Success: true })
+                {
+                    // Full reload: new SSR request carries the session cookie, and the circuit resolves the session from server memory.
+                    Nav.NavigateTo("/", forceLoad: true);
+                    return;
+                }
+                error = resp?.Error ?? "Sign-in failed.";
+            }
+            else
+            {
+                LoginResponse? resp = null;
+                try { resp = JsonSerializer.Deserialize<LoginResponse>(text, JsonOpts); } catch { }
+                error = resp?.Error ?? $"Sign-in failed (HTTP {result.GetProperty("status").GetInt32()}).";
+            }
+        }
+        catch (Exception ex)
+        {
+            error = $"Connection error: {ex.Message}";
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
+}

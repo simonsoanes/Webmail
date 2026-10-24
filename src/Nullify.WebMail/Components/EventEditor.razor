@@ -1,0 +1,238 @@
+@using Nullify.WebMail.Services
+@inject IJSRuntime JS
+@inject CalDavAccountService Dav
+
+<div class="modal-backdrop" @onclick="Cancel">
+    <form class="modal event-editor" role="dialog" aria-modal="true" aria-labelledby="ee-heading"
+          @onclick:stopPropagation="true" @onsubmit="Save" @onsubmit:preventDefault="true">
+        <div class="modal-head">
+            <h3 id="ee-heading">@(Event == null ? "New event" : "Edit event")</h3>
+            <span class="spacer"></span>
+            <button type="button" class="icon-btn" @onclick="Cancel" title="Close"><Icon Name="x" /></button>
+        </div>
+
+        <div class="modal-body">
+            <input class="title-input" @ref="titleInput" @bind="summary" @bind:event="oninput" placeholder="Add a title" aria-label="Title" />
+
+            @if (Event?.IsRecurring == true)
+            {
+                <div class="notice"><Icon Name="refresh" Size="15" /><span>This is a repeating event. Changes apply to every occurrence.</span></div>
+            }
+
+            <div class="field">
+                <label for="ee-cal">Calendar</label>
+                <div class="select-with-dot" style="--cal:@ColorOf(calendarId)">
+                    <span class="dot"></span>
+                    <select id="ee-cal" @bind="calendarId">
+                        @foreach (var c in Calendars) { <option value="@c.Id">@c.Name</option> }
+                    </select>
+                </div>
+            </div>
+
+            <label class="check-row">
+                <input type="checkbox" @bind="allDay" @bind:after="AllDayChanged" /> All day
+            </label>
+
+            <div class="when-grid @(allDay ? "all-day" : "")">
+                <label for="ee-sd">Starts</label>
+                <input id="ee-sd" type="date" @bind="startDate" @bind:after="StartChanged" />
+                @if (!allDay) { <input type="time" @bind="startTime" @bind:after="StartChanged" aria-label="Start time" /> }
+                <label for="ee-ed">Ends</label>
+                <input id="ee-ed" type="date" @bind="endDate" @bind:after="EndChanged" />
+                @if (!allDay) { <input type="time" @bind="endTime" @bind:after="EndChanged" aria-label="End time" /> }
+            </div>
+
+            <div class="field">
+                <label for="ee-repeat">Repeat</label>
+                <select id="ee-repeat" @bind="repeat">
+                    <option value="@EventRepeat.None">Does not repeat</option>
+                    <option value="@EventRepeat.Daily">Every day</option>
+                    <option value="@EventRepeat.Weekly">Every week on @startDate.ToString("dddd", System.Globalization.CultureInfo.InvariantCulture)</option>
+                    <option value="@EventRepeat.Monthly">Every month on day @startDate.Day</option>
+                    <option value="@EventRepeat.Yearly">Every year on @startDate.ToString("d MMMM", System.Globalization.CultureInfo.InvariantCulture)</option>
+                </select>
+                @if (customRule)
+                {
+                    <span class="help">This event uses a more detailed repeat rule; it's kept unless you pick a different option.</span>
+                }
+            </div>
+
+            <div class="field">
+                <label for="ee-loc">Location</label>
+                <input id="ee-loc" @bind="location" @bind:event="oninput" />
+            </div>
+            <div class="field">
+                <label for="ee-desc">Notes</label>
+                <textarea id="ee-desc" rows="3" @bind="description" @bind:event="oninput"></textarea>
+            </div>
+
+            @if (error != null)
+            {
+                <div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@error</div></div>
+            }
+        </div>
+
+        <div class="modal-foot">
+            @if (Event != null)
+            {
+                @if (confirmDelete)
+                {
+                    <span class="delete-confirm">
+                        @if (Event.IsRecurring)
+                        {
+                            <button type="button" class="btn danger small" @onclick="() => Delete(true)" disabled="@busy">This occurrence</button>
+                            <button type="button" class="btn danger small" @onclick="() => Delete(false)" disabled="@busy">All occurrences</button>
+                        }
+                        else
+                        {
+                            <button type="button" class="btn danger small" @onclick="() => Delete(false)" disabled="@busy">Delete event</button>
+                        }
+                        <button type="button" class="btn ghost small" @onclick="() => confirmDelete = false">Keep</button>
+                    </span>
+                }
+                else
+                {
+                    <button type="button" class="btn ghost danger" @onclick="() => confirmDelete = true" disabled="@busy"><Icon Name="trash" Size="15" /> Delete</button>
+                }
+            }
+            <span class="spacer"></span>
+            <button type="button" class="btn" @onclick="Cancel" disabled="@busy">Cancel</button>
+            <button type="submit" class="btn accent" disabled="@busy">@if (busy) { <span class="spinner"></span> } Save</button>
+        </div>
+    </form>
+</div>
+
+@code {
+    [Parameter] public CalendarEvent? Event { get; set; }
+    [Parameter] public IReadOnlyList<CalendarInfo> Calendars { get; set; } = [];
+    [Parameter] public Func<string?, string> ColorOf { get; set; } = _ => "var(--accent)";
+    [Parameter] public string? DefaultCalendarId { get; set; }
+    [Parameter] public DateOnly Day { get; set; }
+    [Parameter] public TimeZoneInfo Zone { get; set; } = TimeZoneInfo.Utc;
+    /// <summary>Returns an error message, or null when saved.</summary>
+    [Parameter] public Func<EventEdit, string, Task<string?>>? OnSave { get; set; }
+    /// <summary>Argument: true = only this occurrence. Returns an error message, or null.</summary>
+    [Parameter] public Func<bool, Task<string?>>? OnDelete { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private string summary = "", location = "", description = "", calendarId = "";
+    private bool allDay, customRule, confirmDelete, busy;
+    private DateOnly startDate, endDate;
+    private TimeOnly startTime, endTime;
+    private EventRepeat repeat;
+    private string? error;
+    private string initial = "";
+    private ElementReference titleInput;
+
+    protected override async Task OnInitializedAsync()
+    {
+        calendarId = Event?.CalendarId ?? DefaultCalendarId ?? Calendars.FirstOrDefault()?.Id ?? "";
+        if (Event is { } ev)
+        {
+            summary = ev.Summary == "(no title)" ? "" : ev.Summary;
+            location = ev.Location ?? "";
+            description = ev.Description ?? "";
+            allDay = ev.AllDay;
+            if (allDay)
+            {
+                startDate = DateOnly.FromDateTime(ev.Start.UtcDateTime);
+                endDate = DateOnly.FromDateTime(ev.End.UtcDateTime).AddDays(-1); // stored end is exclusive
+                if (endDate < startDate) endDate = startDate;
+                startTime = new TimeOnly(9, 0);
+                endTime = new TimeOnly(10, 0);
+            }
+            else
+            {
+                var s = TimeZoneInfo.ConvertTime(ev.Start, Zone).DateTime;
+                var e = TimeZoneInfo.ConvertTime(ev.End, Zone).DateTime;
+                (startDate, startTime) = (DateOnly.FromDateTime(s), TimeOnly.FromDateTime(s));
+                (endDate, endTime) = (DateOnly.FromDateTime(e), TimeOnly.FromDateTime(e));
+            }
+            if (ev.IsRecurring)
+            {
+                // The instance doesn't carry the rule; read it from the series.
+                try { repeat = await Dav.GetRepeatAsync(ev); } catch { repeat = EventRepeat.Weekly; }
+                customRule = repeat == EventRepeat.None;
+                if (customRule) repeat = EventRepeat.Weekly;
+            }
+        }
+        else
+        {
+            // New: the next whole hour today, otherwise 09:00 on the chosen day; one hour long.
+            var now = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, Zone).DateTime;
+            var today = DateOnly.FromDateTime(now);
+            var hour = Day == today ? Math.Min(now.Hour + 1, 23) : 9;
+            startDate = endDate = Day;
+            startTime = new TimeOnly(hour, 0);
+            endTime = hour == 23 ? new TimeOnly(23, 59) : new TimeOnly(hour + 1, 0);
+        }
+        duration = EndValue - StartValue;
+        if (duration < TimeSpan.Zero) duration = TimeSpan.Zero;
+        initial = Snapshot();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender) try { await titleInput.FocusAsync(); } catch { /* not attached */ }
+    }
+
+    private string Snapshot() => string.Join("|", summary, location, description, calendarId, allDay, startDate, startTime, endDate, endTime, repeat);
+
+    private DateTime StartValue => startDate.ToDateTime(allDay ? TimeOnly.MinValue : startTime);
+    private DateTime EndValue => endDate.ToDateTime(allDay ? TimeOnly.MinValue : endTime);
+
+    /// <summary>Length kept when the start moves; updated whenever the end is edited.</summary>
+    private TimeSpan duration = TimeSpan.FromHours(1);
+
+    private void StartChanged()
+    {
+        var end = StartValue + duration;
+        endDate = DateOnly.FromDateTime(end);
+        if (!allDay) endTime = TimeOnly.FromDateTime(end);
+    }
+
+    private void EndChanged()
+    {
+        var length = EndValue - StartValue;
+        if (length >= TimeSpan.Zero) duration = length;
+    }
+
+    private void AllDayChanged()
+    {
+        if (endDate < startDate) endDate = startDate;
+        EndChanged();
+    }
+
+    private async Task Save()
+    {
+        error = null;
+        var (start, end) = (StartValue, EndValue);
+        if (end < start)
+        {
+            error = "The event ends before it starts.";
+            return;
+        }
+        if (string.IsNullOrEmpty(calendarId))
+        {
+            error = "Choose a calendar.";
+            return;
+        }
+        var edit = new EventEdit(summary, location, description, allDay, start, end, repeat);
+        busy = true;
+        try { if (OnSave != null) error = await OnSave(edit, calendarId); }
+        finally { busy = false; }
+    }
+
+    private async Task Delete(bool onlyThis)
+    {
+        busy = true;
+        try { if (OnDelete != null) error = await OnDelete(onlyThis); }
+        finally { busy = false; }
+    }
+
+    private async Task Cancel()
+    {
+        if (Snapshot() != initial && !await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard your changes to this event?")) return;
+        await OnClose.InvokeAsync();
+    }
+}

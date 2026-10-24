@@ -1,0 +1,166 @@
+@using Nullify.WebMail.Services
+@inject PgpBrowser Pgp
+@inject CalDavAccountService Dav
+@inject AppState State
+
+@* Offers to save an OpenPGP public key that arrived as an attachment to the matching contact. *@
+<div class="pgp-banner key-offer @(state == State_.Saved ? "good" : "")">
+    <Icon Name="@(state == State_.Saved ? "check" : "key")" Size="16" />
+    <div class="lines">
+        @switch (state)
+        {
+            case State_.Idle:
+                <span><b>@Filename</b> looks like an OpenPGP key.</span>
+                break;
+            case State_.Working:
+                <span><span class="spinner"></span> Reading the key…</span>
+                break;
+            case State_.Failed:
+                <span>@error</span>
+                break;
+            case State_.Saved:
+                <span>Saved to @savedName. Messages to them can now be encrypted.</span>
+                break;
+            case State_.Review when info != null:
+                <div class="key-chip">
+                    <span class="key-uid">@(info.PrimaryUserId ?? "Public key")</span>
+                    <code>@PgpFormat.Fingerprint(info.Fingerprint)</code>
+                    <span class="muted" style="font-size:.78rem;">
+                        @info.Algorithm · @(info.Expires is { } x ? (info.Expired ? $"expired {x:d MMM yyyy}" : $"expires {x:d MMM yyyy}") : "no expiry")
+                    </span>
+                </div>
+                @foreach (var w in warnings) { <small class="key-warning"><Icon Name="alert" Size="12" Class="inline-icon" /> @w</small> }
+                <span>
+                    @if (target == null) { <text>Create a contact for <b>@NewName()</b> with this key?</text> }
+                    else if (target.PublicKey != null && SameKey) { <text><b>@target.FullName</b> already has this key.</text> }
+                    else if (target.PublicKey != null) { <text>Replace <b>@target.FullName</b>'s current key with this one?</text> }
+                    else { <text>Add this key to <b>@target.FullName</b>?</text> }
+                </span>
+                break;
+        }
+    </div>
+    <span class="spacer"></span>
+    @if (state == State_.Idle)
+    {
+        <button class="btn small" @onclick="Review"><Icon Name="user" Size="14" /> Add to contact</button>
+    }
+    else if (state == State_.Review && !(target?.PublicKey != null && SameKey))
+    {
+        <span class="key-offer-actions">
+            <button class="btn small" @onclick="() => state = State_.Idle" disabled="@busy">Cancel</button>
+            <button class="btn small accent" @onclick="Save" disabled="@busy">@if (busy) { <span class="spinner"></span> } @(target == null ? "Create contact" : target.PublicKey != null ? "Replace key" : "Add key")</button>
+        </span>
+    }
+    else if (state is State_.Review or State_.Failed)
+    {
+        <button class="btn small" @onclick="() => state = State_.Idle">Close</button>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Filename { get; set; } = "";
+    /// <summary>Fetches the attachment's bytes (armored or binary).</summary>
+    [Parameter, EditorRequired] public Func<Task<byte[]?>> Load { get; set; } = default!;
+    [Parameter] public MailFormat.Address? Sender { get; set; }
+
+    private enum State_ { Idle, Working, Review, Saved, Failed }
+    private State_ state;
+    private string? error, armored, savedName;
+    private PgpKeyInfo? info;
+    private ContactInfo? target;
+    private List<string> warnings = new();
+    private bool busy;
+
+    private bool SameKey => target?.PublicKey is { } k && OpenPgpArmor.Dearmor(k) is { } a
+                            && armored != null && OpenPgpArmor.Dearmor(armored) is { } b && a.AsSpan().SequenceEqual(b);
+
+    /// <summary>
+    /// Read the key and pick the contact: one whose addresses the key covers, else the sender's.
+    /// </summary>
+    private async Task Review()
+    {
+        state = State_.Working;
+        try
+        {
+            var bytes = await Load();
+            if (bytes == null || bytes.Length == 0) { Fail("The attachment couldn't be downloaded."); return; }
+            // Armored text, or binary packets (.gpg / .pgp) which the engine reads once armored.
+            var text = System.Text.Encoding.UTF8.GetString(bytes);
+            if (!text.Contains("-----BEGIN PGP ")) text = OpenPgpArmor.Armor("PGP PUBLIC KEY BLOCK", bytes);
+
+            var keys = await Pgp.InspectAsync(text);
+            if (keys.Length == 0) { Fail($"{Filename} doesn't contain an OpenPGP key."); return; }
+            info = keys[0];
+            armored = await Pgp.PublicOfAsync(text); // never store secret material on a contact
+
+            warnings = new();
+            if (keys.Length > 1) warnings.Add($"The file holds {keys.Length} keys; only the first is used.");
+            if (info.IsSecret) warnings.Add("This file includes a secret key. Only the public part will be saved.");
+            if (info.Revoked) warnings.Add("This key has been revoked by its owner.");
+            else if (info.Expired) warnings.Add("This key has expired.");
+            else if (!info.CanEncrypt) warnings.Add("This key can't be used for encryption.");
+            if (Sender?.Email is { Length: > 0 } from && info.Emails.Length > 0
+                && !info.Emails.Contains(from, StringComparer.OrdinalIgnoreCase))
+                warnings.Add($"The key is for {string.Join(", ", info.Emails)}, not the sender ({from}).");
+
+            var contacts = (await Dav.GetContactsAsync())?.Contacts
+                ?? throw new InvalidOperationException("Contacts aren't set up, so the key can't be saved. Configure them in Settings.");
+            bool Has(ContactInfo c, string e) => c.Emails.Any(x => string.Equals(x.Value, e, StringComparison.OrdinalIgnoreCase));
+            target = contacts.FirstOrDefault(c => info.Emails.Any(e => Has(c, e)))
+                     ?? (Sender?.Email is { Length: > 0 } s && (info.Emails.Length == 0 || info.Emails.Contains(s, StringComparer.OrdinalIgnoreCase))
+                         ? contacts.FirstOrDefault(c => Has(c, s)) : null);
+            state = State_.Review;
+        }
+        catch (PgpException ex) { Fail($"{Filename} couldn't be read as a key: {ex.Message}"); }
+        catch (InvalidOperationException ex) { Fail(ex.Message); }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException)
+        {
+            Fail($"Couldn't load your contacts: {ex.Message}");
+        }
+    }
+
+    /// <summary>The name for a new contact: the key's user ID name, else the sender's display name.</summary>
+    private string NewName()
+    {
+        var uid = info?.PrimaryUserId ?? "";
+        var lt = uid.IndexOf('<');
+        var name = (lt > 0 ? uid[..lt] : uid.Contains('@') ? "" : uid).Trim();
+        if (name.Length == 0) name = Sender?.Name ?? "";
+        return name.Length > 0 ? name : info?.Emails.FirstOrDefault() ?? Sender?.Email ?? "New contact";
+    }
+
+    private async Task Save()
+    {
+        if (info == null || armored == null) return;
+        busy = true;
+        try
+        {
+            ContactEdit edit;
+            if (target != null)
+            {
+                edit = new ContactEdit(target.GivenName, target.FamilyName, target.Organization, target.Title,
+                    target.Emails, target.Phones, target.Birthday, target.Note) { PublicKey = armored };
+            }
+            else
+            {
+                var name = NewName();
+                var space = name.IndexOf(' ');
+                var emails = info.Emails.Select(e => new ContactValue(e, "Work")).ToList();
+                if (emails.Count == 0 && Sender?.Email is { Length: > 0 } s) emails.Add(new ContactValue(s, "Work"));
+                edit = new ContactEdit(space > 0 ? name[..space] : name, space > 0 ? name[(space + 1)..] : null,
+                    null, null, emails, [], null, null) { PublicKey = armored };
+            }
+            var saved = await Dav.SaveContactAsync(target, edit, null);
+            savedName = saved.FullName;
+            state = State_.Saved;
+            State.ShowToast(target == null ? $"Added {saved.FullName} with their key" : $"Saved key to {saved.FullName}");
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            Fail(ex is TaskCanceledException ? "The contacts server did not respond in time." : $"Couldn't save the contact: {ex.Message}");
+        }
+        finally { busy = false; }
+    }
+
+    private void Fail(string message) => (state, error) = (State_.Failed, message);
+}

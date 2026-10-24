@@ -1,0 +1,135 @@
+@using System.Net
+@using Nullify.WebMail.Services
+@inject IJSRuntime JS
+
+@* Comma-separated recipient field that completes the address being typed from Contacts. *@
+<div class="recipient-input">
+    <input @ref="input" id="@Id" type="text" value="@Value" placeholder="@Placeholder"
+           autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list"
+           aria-expanded="@IsOpen" aria-controls="@($"{Id}-list")"
+           aria-activedescendant="@(IsOpen ? $"{Id}-opt-{active}" : null)"
+           data-suggest-open="@(IsOpen ? "true" : "false")"
+           @oninput="OnInput" @onkeydown="OnKey" @onfocus="OnFocus" @onblur="OnBlur" />
+    @if (IsOpen)
+    {
+        <div class="suggest-menu" id="@($"{Id}-list")" role="listbox">
+            @for (var i = 0; i < matches.Count; i++)
+            {
+                var index = i;
+                var c = matches[i];
+                var a = new MailFormat.Address(c.Name, c.Email);
+                <div class="suggest-item @(index == active ? "active" : "")" id="@($"{Id}-opt-{index}")" role="option"
+                     aria-selected="@(index == active)" aria-label="@($"{c.Formatted}{(c.Label != null ? $" ({c.Label})" : "")}")"
+                     @onmousedown="() => Pick(c)" @onmousedown:preventDefault="true"
+                     @onmouseenter="() => active = index">
+                    @if (c.Photo != null)
+                    {
+                        <img class="avatar sm" src="@c.Photo" alt="" />
+                    }
+                    else
+                    {
+                        <span class="avatar sm" style="--hue:@MailFormat.AvatarHue(a)">@MailFormat.Initials(a)</span>
+                    }
+                    <span class="suggest-text">
+                        <span class="suggest-name">@((MarkupString)Highlight(c.Name))</span>
+                        <span class="suggest-email">@((MarkupString)Highlight(c.Email))@if (c.Label != null) { <span class="suggest-label">@c.Label</span> }</span>
+                    </span>
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Id { get; set; } = "";
+    [Parameter] public string Value { get; set; } = "";
+    [Parameter] public EventCallback<string> ValueChanged { get; set; }
+    [Parameter] public string? Placeholder { get; set; }
+    /// <summary>Addresses to suggest; null while contacts are still loading (or unavailable).</summary>
+    [Parameter] public IReadOnlyList<RecipientCandidate>? Candidates { get; set; }
+    /// <summary>Raised on first focus so the parent can load contacts lazily.</summary>
+    [Parameter] public EventCallback OnFirstFocus { get; set; }
+
+    private ElementReference input;
+    private List<RecipientCandidate> matches = new();
+    private int active;
+    private bool focused, focusedOnce, dismissed;
+    private string token = "";
+
+    private bool IsOpen => focused && !dismissed && matches.Count > 0;
+
+    public ValueTask FocusAsync() => input.FocusAsync();
+
+    protected override void OnParametersSet()
+    {
+        // Contacts may arrive after the user started typing.
+        if (focused) Recompute();
+    }
+
+    private async Task OnFocus()
+    {
+        focused = true;
+        if (!focusedOnce)
+        {
+            focusedOnce = true;
+            await OnFirstFocus.InvokeAsync();
+        }
+    }
+
+    private void OnBlur()
+    {
+        focused = false;
+        dismissed = false;
+    }
+
+    private async Task OnInput(ChangeEventArgs e)
+    {
+        Value = e.Value?.ToString() ?? "";
+        dismissed = false;
+        Recompute();
+        await ValueChanged.InvokeAsync(Value);
+    }
+
+    private void Recompute()
+    {
+        var (_, current) = RecipientSuggester.CurrentToken(Value);
+        token = current;
+        var added = MailFormat.ParseAddressList(Value).Select(a => a.Email);
+        matches = Candidates == null ? [] : RecipientSuggester.Rank(Candidates, token, added);
+        active = Math.Clamp(active, 0, Math.Max(0, matches.Count - 1));
+    }
+
+    private async Task OnKey(KeyboardEventArgs e)
+    {
+        // app.js stops the browser's default for these keys while the list is open.
+        if (!IsOpen || e.CtrlKey || e.MetaKey) return;
+        switch (e.Key)
+        {
+            case "ArrowDown": active = (active + 1) % matches.Count; break;
+            case "ArrowUp": active = (active - 1 + matches.Count) % matches.Count; break;
+            case "Enter" or "Tab": await Pick(matches[active]); break;
+            case "Escape": dismissed = true; break;
+        }
+    }
+
+    private async Task Pick(RecipientCandidate c)
+    {
+        var (prefix, _) = RecipientSuggester.CurrentToken(Value);
+        var lead = prefix.Length > 0 && !prefix.EndsWith(' ') ? prefix + " " : prefix;
+        Value = $"{lead}{c.Formatted}, ";
+        matches = [];
+        active = 0;
+        await ValueChanged.InvokeAsync(Value);
+        try { await JS.InvokeVoidAsync("nullifyApp.focusEnd", input); } catch { /* circuit gone */ }
+    }
+
+    /// <summary>HTML-encode <paramref name="text"/>, bolding the first case-insensitive match of the typed text.</summary>
+    private string Highlight(string text)
+    {
+        var t = token.Trim('"', '<');
+        var at = t.Length == 0 ? -1 : text.IndexOf(t, StringComparison.CurrentCultureIgnoreCase);
+        if (at < 0) return WebUtility.HtmlEncode(text);
+        return WebUtility.HtmlEncode(text[..at]) + "<b>" + WebUtility.HtmlEncode(text.Substring(at, t.Length)) + "</b>"
+               + WebUtility.HtmlEncode(text[(at + t.Length)..]);
+    }
+}

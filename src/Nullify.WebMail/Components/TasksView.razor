@@ -1,0 +1,592 @@
+@using Nullify.WebMail.Services
+@inject CalDavAccountService Dav
+@inject ApiService Api
+@inject AppState State
+@inject IJSRuntime JS
+
+@* Tasks are VTODOs on the CalDAV server: list (grouped by due date) | task editor. *@
+<div class="contacts-shell">
+    <div class="contacts-grid @(DetailOpen ? "show-detail" : "")">
+        <section class="contacts-pane-list" aria-label="Tasks">
+            <div class="pane-head">
+                <h2>Tasks</h2>
+                @if (list != null) { <span class="muted" title="Open tasks">@OpenCount</span> }
+                @if (loading) { <span class="spinner" style="color:var(--muted);" aria-label="Loading"></span> }
+                <span class="spacer"></span>
+                <button class="icon-btn" @onclick="Refresh" title="Refresh" disabled="@loading"><Icon Name="refresh" Size="17" /></button>
+                @if (status == Status.Ready && list?.Collections.Count > 0)
+                {
+                    <button class="btn accent small" @onclick="StartNew"><Icon Name="plus" Size="14" /> New</button>
+                }
+            </div>
+
+            @switch (status)
+            {
+                case Status.NotConfigured:
+                    <div class="empty-state">
+                        <div class="empty-icon"><Icon Name="tasks" Size="26" /></div>
+                        <h3>No calendar server connected</h3>
+                        <p>Tasks are kept on the same server as your calendar. Set one up in Settings.</p>
+                        <button class="btn" @onclick="OpenSettings">Open settings</button>
+                    </div>
+                    break;
+                case Status.NeedsReentry:
+                    <div class="pane-pad">
+                        <div class="alert warn" role="alert">
+                            <Icon Name="lock" Size="15" />
+                            <div>Your saved CalDAV password needs to be entered again because your mail password changed.
+                                <button class="link-btn" @onclick="OpenSettings">Open settings</button></div>
+                        </div>
+                    </div>
+                    break;
+                case Status.Error:
+                    <div class="pane-pad">
+                        <div class="alert err" role="alert">
+                            <Icon Name="alert" Size="15" />
+                            <div>Couldn't load your tasks: @error
+                                <button class="link-btn" @onclick="OpenSettings">Check settings</button></div>
+                        </div>
+                    </div>
+                    break;
+            }
+
+            @if (list != null && status == Status.Ready)
+            {
+                @if (list.Collections.Count == 0)
+                {
+                    <div class="empty-state">
+                        <div class="empty-icon"><Icon Name="tasks" Size="26" /></div>
+                        <h3>Nowhere to keep tasks yet</h3>
+                        <p>None of your calendars on the server accept tasks. Create a task list to start.</p>
+                        <button class="btn accent" @onclick="CreateList" disabled="@creatingList">
+                            @if (creatingList) { <span class="spinner"></span> } Create a task list
+                        </button>
+                    </div>
+                }
+                else
+                {
+                    <div class="pane-pad">
+                        @foreach (var e in list.Errors)
+                        {
+                            <div class="alert warn"><Icon Name="alert" Size="15" /><div>@e</div></div>
+                        }
+                        <form class="quick-add" @onsubmit="QuickAdd" @onsubmit:preventDefault="true">
+                            <input @ref="quickInput" @bind="quickTitle" @bind:event="oninput" placeholder="Add a task@(QuickListName is { } n ? $" to {n}" : "")"
+                                   aria-label="New task title" disabled="@quickBusy" />
+                            <button type="submit" class="icon-btn" title="Add task" disabled="@(quickBusy || string.IsNullOrWhiteSpace(quickTitle))">
+                                @if (quickBusy) { <span class="spinner"></span> } else { <Icon Name="plus" Size="17" /> }
+                            </button>
+                        </form>
+                        <div class="filter-chips" role="group" aria-label="Task lists">
+                            @if (list.Collections.Count > 1)
+                            {
+                                <button class="filter-chip @(collection == null ? "on" : "")" aria-pressed="@(collection == null)" @onclick="() => collection = null">All</button>
+                                @foreach (var c in list.Collections)
+                                {
+                                    var id = c.Id;
+                                    <button class="filter-chip @(collection == id ? "on" : "")" aria-pressed="@(collection == id)" @onclick="() => collection = id">@c.Name</button>
+                                }
+                            }
+                            <button class="filter-chip @(showCompleted ? "on" : "")" aria-pressed="@showCompleted" @onclick="ToggleCompleted">
+                                <Icon Name="check" Size="12" /> Completed
+                            </button>
+                        </div>
+                    </div>
+
+                    var visible = Visible().ToList();
+                    <div class="contact-rows">
+                        @if (visible.Count == 0)
+                        {
+                            <div class="empty-state">
+                                <div class="empty-icon"><Icon Name="tasks" Size="24" /></div>
+                                <h3>@(Scoped().Any() ? "All done" : "No tasks yet")</h3>
+                                <p>@(Scoped().Any() ? "Every task here is completed." : "Type a task above and press Enter.")</p>
+                            </div>
+                        }
+                        @foreach (var group in Groups(visible))
+                        {
+                            <div class="contact-letter @(group.Key == "Overdue" ? "overdue" : "")">@group.Key</div>
+                            @foreach (var t in group.Items)
+                            {
+                                var task = t;
+                                var due = DueLabel(task);
+                                <div class="task-row @(task.Completed ? "done" : "") @(selected?.Href == task.Href && !creating ? "active" : "")">
+                                    <button class="task-check @(task.Completed ? "on" : "")" role="checkbox" aria-checked="@task.Completed"
+                                            title="@(task.Completed ? "Mark as not done" : "Mark as done")" disabled="@(toggling.Contains(task.Href ?? ""))"
+                                            @onclick="() => Toggle(task)">
+                                        <Icon Name="check" Size="12" />
+                                    </button>
+                                    <button class="task-main" @onclick="() => Select(task)">
+                                        <span class="task-title">@task.Title</span>
+                                        @if (due != null || task.Priority != TaskPriority.None || task.IsRecurring || task.Notes != null || ShowListName)
+                                        {
+                                            <span class="task-meta">
+                                                @if (task.Priority != TaskPriority.None)
+                                                {
+                                                    <span class="prio-@task.Priority.ToString().ToLowerInvariant()" title="@task.Priority priority"><Icon Name="flag" Size="11" Class="inline-icon" /> @task.Priority</span>
+                                                }
+                                                @if (due != null)
+                                                {
+                                                    <span class="@(IsOverdue(task) ? "overdue" : "")"><Icon Name="calendar" Size="11" Class="inline-icon" /> @due</span>
+                                                }
+                                                @if (task.IsRecurring) { <span title="Repeats"><Icon Name="refresh" Size="11" Class="inline-icon" /></span> }
+                                                @if (task.Notes != null) { <span title="Has notes"><Icon Name="file-text" Size="11" Class="inline-icon" /></span> }
+                                                @if (ShowListName) { <span>@ListName(task.CollectionId)</span> }
+                                            </span>
+                                        }
+                                    </button>
+                                </div>
+                            }
+                        }
+                    </div>
+                }
+            }
+        </section>
+
+        <section class="contacts-pane-detail" aria-label="Task">
+            @if (creating || selected != null)
+            {
+                <div class="detail-scroll">
+                    <div class="detail-inner">
+                        <form class="contact-editor task-editor" @onsubmit="Save" @onsubmit:preventDefault="true">
+                            <button type="button" class="btn ghost small narrow-back" @onclick="Back"><Icon Name="arrow-left" Size="15" /> Back</button>
+                            <div class="editor-head"><h3>@(creating ? "New task" : "Edit task")</h3></div>
+
+                            @if (selected?.IsRecurring == true && !creating)
+                            {
+                                <div class="notice"><Icon Name="refresh" Size="15" /><span>This task repeats. Changes here, including marking it done, apply to the whole series.</span></div>
+                            }
+
+                            <div class="field">
+                                <label for="te-title">Title</label>
+                                <input id="te-title" @ref="titleInput" @bind="title" @bind:event="oninput" />
+                            </div>
+
+                            <label class="check-row">
+                                <input type="checkbox" @bind="completed" /> Completed
+                            </label>
+
+                            <div class="field-row">
+                                <div class="field">
+                                    <label for="te-due">Due</label>
+                                    <div class="due-input">
+                                        <input id="te-due" type="date" @bind="dueDate" />
+                                        @if (dueDate != null && hasTime) { <input type="time" @bind="dueTime" aria-label="Due time" /> }
+                                        @if (dueDate != null)
+                                        {
+                                            <button type="button" class="icon-btn small" @onclick="ClearDue" title="Remove due date"><Icon Name="x" Size="14" /></button>
+                                        }
+                                    </div>
+                                    @if (dueDate != null)
+                                    {
+                                        <label class="check-row" style="margin:.25rem 0 0;"><input type="checkbox" @bind="hasTime" /> At a set time</label>
+                                    }
+                                </div>
+                                <div class="field">
+                                    <label for="te-prio">Priority</label>
+                                    <select id="te-prio" @bind="priority">
+                                        <option value="@TaskPriority.None">None</option>
+                                        <option value="@TaskPriority.High">High</option>
+                                        <option value="@TaskPriority.Medium">Medium</option>
+                                        <option value="@TaskPriority.Low">Low</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            @if (list?.Collections.Count > 1)
+                            {
+                                <div class="field">
+                                    <label for="te-list">List</label>
+                                    <select id="te-list" @bind="collectionId">
+                                        @foreach (var c in list.Collections) { <option value="@c.Id">@c.Name</option> }
+                                    </select>
+                                </div>
+                            }
+
+                            <div class="field">
+                                <label for="te-notes">Notes</label>
+                                <textarea id="te-notes" rows="6" @bind="notes" @bind:event="oninput"></textarea>
+                            </div>
+
+                            @if (editError != null)
+                            {
+                                <div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@editError</div></div>
+                            }
+
+                            <div class="editor-actions">
+                                @if (!creating)
+                                {
+                                    @if (confirmDelete)
+                                    {
+                                        <span class="delete-confirm">
+                                            <button type="button" class="btn danger small" @onclick="Delete" disabled="@busy">Delete task</button>
+                                            <button type="button" class="btn ghost small" @onclick="() => confirmDelete = false">Keep</button>
+                                        </span>
+                                    }
+                                    else
+                                    {
+                                        <button type="button" class="btn ghost danger" @onclick="() => confirmDelete = true" disabled="@busy"><Icon Name="trash" Size="15" /> Delete</button>
+                                    }
+                                }
+                                <span class="spacer"></span>
+                                <button type="button" class="btn" @onclick="Back" disabled="@busy">Cancel</button>
+                                <button type="submit" class="btn accent" disabled="@busy">@if (busy) { <span class="spinner"></span> } Save</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            }
+            else
+            {
+                <div class="empty-state">
+                    <div class="empty-icon"><Icon Name="tasks" Size="26" /></div>
+                    <h3>No task selected</h3>
+                    <p>Choose a task to see its details, or add one with the box on the left.</p>
+                </div>
+            }
+        </section>
+    </div>
+</div>
+
+@code {
+    private enum Status { Loading, Ready, NotConfigured, NeedsReentry, Error }
+
+    private static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+    private const string ShowCompletedPref = "tasks.showCompleted";
+
+    private TaskList? list;
+    private TaskItem? selected;
+    private bool creating, creatingList, busy, confirmDelete, showCompleted, quickBusy, focusTitle;
+    private string? collection;
+    private string quickTitle = "";
+    private readonly HashSet<string> toggling = new();
+    private Status status = Status.Loading;
+    private string? error, editError;
+    private bool loading;
+    private ElementReference quickInput, titleInput;
+
+    // editor
+    private string title = "", notes = "", collectionId = "";
+    private DateOnly? dueDate;
+    private TimeOnly dueTime = new(9, 0);
+    private bool hasTime, completed;
+    private TaskPriority priority;
+    private string initial = "";
+
+    private bool DetailOpen => selected != null || creating;
+    private bool ShowListName => collection == null && list?.Collections.Count > 1;
+    private int OpenCount => Scoped().Count(t => !t.Completed);
+
+    /// <summary>Quick add goes to the list being shown, else the first list.</summary>
+    private string? QuickList => collection ?? list?.Collections.FirstOrDefault()?.Id;
+    private string? QuickListName => list?.Collections.Count > 1 ? ListName(QuickList) : null;
+
+    private DateTime Now => TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, State.TimeZone).DateTime;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try { showCompleted = (await Api.GetPreferencesAsync()).FirstOrDefault(p => p.Key == ShowCompletedPref)?.Value == "1"; }
+        catch { /* default: hidden */ }
+        await Load(refresh: false);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!focusTitle) return;
+        focusTitle = false;
+        try { await titleInput.FocusAsync(); } catch { /* not attached */ }
+    }
+
+    private async Task Load(bool refresh)
+    {
+        loading = true;
+        try
+        {
+            list = await Dav.GetTasksAsync(State.TimeZone, refresh);
+            status = list == null ? Status.NotConfigured : Status.Ready;
+            if (collection != null && list?.Collections.All(c => c.Id != collection) != false) collection = null;
+            if (selected != null) selected = list?.Tasks.FirstOrDefault(t => t.Href == selected.Href);
+        }
+        catch (InvalidOperationException)
+        {
+            status = Status.NeedsReentry;
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException)
+        {
+            status = Status.Error;
+            error = ex is TaskCanceledException ? "the server did not respond in time." : ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task Refresh()
+    {
+        if (!await ConfirmDiscard()) return;
+        await Load(refresh: true);
+        if (selected != null) Edit(selected);
+        else if (!creating) initial = Snapshot();
+    }
+
+    // ---- list ----
+
+    private IEnumerable<TaskItem> Scoped() =>
+        (list?.Tasks ?? []).Where(t => collection == null || t.CollectionId == collection);
+
+    private IEnumerable<TaskItem> Visible() => Scoped().Where(t => showCompleted || !t.Completed);
+
+    /// <summary>Open tasks by when they're due, then completed ones, most recent first.</summary>
+    private IEnumerable<(string Key, List<TaskItem> Items)> Groups(List<TaskItem> tasks)
+    {
+        var today = DateOnly.FromDateTime(Now);
+        var open = tasks.Where(t => !t.Completed)
+            .OrderBy(t => t.Due == null).ThenBy(t => t.Due).ThenBy(t => PriorityRank(t.Priority)).ThenBy(t => t.Title, StringComparer.CurrentCultureIgnoreCase)
+            .ToList();
+        (string Key, Func<TaskItem, bool> Match)[] buckets =
+        [
+            ("Overdue", t => IsOverdue(t)),
+            ("Today", t => DueDay(t) == today),
+            ("Tomorrow", t => DueDay(t) == today.AddDays(1)),
+            ("Upcoming", t => t.Due != null),
+            ("No due date", _ => true),
+        ];
+        var placed = new HashSet<TaskItem>();
+        foreach (var (key, match) in buckets)
+        {
+            var items = open.Where(t => !placed.Contains(t) && match(t)).ToList();
+            placed.UnionWith(items);
+            if (items.Count > 0) yield return (key, items);
+        }
+        var done = tasks.Where(t => t.Completed).OrderByDescending(t => t.CompletedAt ?? DateTimeOffset.MinValue).ToList();
+        if (done.Count > 0) yield return ("Completed", done);
+    }
+
+    private static int PriorityRank(TaskPriority p) => p switch
+    {
+        TaskPriority.High => 0, TaskPriority.Medium => 1, TaskPriority.Low => 2, _ => 3,
+    };
+
+    private DateOnly? DueDay(TaskItem t) => t.Due is not { } due ? null
+        : t.DueIsDate ? DateOnly.FromDateTime(due.UtcDateTime)
+        : DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(due, State.TimeZone).DateTime);
+
+    private bool IsOverdue(TaskItem t) =>
+        !t.Completed && t.Due is { } due && (t.DueIsDate ? DueDay(t) < DateOnly.FromDateTime(Now) : due < DateTimeOffset.UtcNow);
+
+    private string? DueLabel(TaskItem t)
+    {
+        if (DueDay(t) is not { } day) return null;
+        var today = DateOnly.FromDateTime(Now);
+        var text = (day.DayNumber - today.DayNumber) switch
+        {
+            0 => "Today",
+            1 => "Tomorrow",
+            -1 => "Yesterday",
+            > 1 and < 7 => day.ToString("dddd", Inv),
+            _ => day.ToString(day.Year == today.Year ? "ddd d MMM" : "d MMM yyyy", Inv),
+        };
+        return t.DueIsDate ? text : $"{text} {TimeZoneInfo.ConvertTime(t.Due!.Value, State.TimeZone):HH:mm}";
+    }
+
+    private string ListName(string? id) => list?.Collections.FirstOrDefault(c => c.Id == id)?.Name ?? "Tasks";
+
+    private async Task ToggleCompleted()
+    {
+        showCompleted = !showCompleted;
+        try { await Api.SetPreferenceAsync(ShowCompletedPref, showCompleted ? "1" : null); }
+        catch { /* cosmetic */ }
+    }
+
+    private async Task QuickAdd()
+    {
+        var text = quickTitle.Trim();
+        if (text.Length == 0 || QuickList is not { } target) return;
+        quickBusy = true;
+        try
+        {
+            await Dav.SaveTaskAsync(null, new TaskEdit(text, null, null, false, false, TaskPriority.None), target, State.TimeZone);
+            quickTitle = "";
+            list = await Dav.GetTasksAsync(State.TimeZone);
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            State.ShowToast($"Couldn't add the task: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            quickBusy = false;
+        }
+        StateHasChanged();
+        try { await quickInput.FocusAsync(); } catch { /* not attached */ }
+    }
+
+    private async Task Toggle(TaskItem task)
+    {
+        if (task.Href == null || !toggling.Add(task.Href)) return;
+        try
+        {
+            await Dav.SetTaskCompletedAsync(task, !task.Completed);
+            if (!task.Completed) State.ShowToast(task.IsRecurring ? "Repeating task marked done" : "Task completed");
+            list = await Dav.GetTasksAsync(State.TimeZone);
+            // Keep an open editor in step with the change, unless it has edits of its own.
+            if (selected?.Href == task.Href)
+            {
+                var clean = Snapshot() == initial;
+                selected = list?.Tasks.FirstOrDefault(t => t.Href == task.Href);
+                if (selected != null && clean) Edit(selected);
+            }
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            State.ShowToast($"Couldn't update the task: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            toggling.Remove(task.Href);
+        }
+    }
+
+    // ---- editor ----
+
+    private string Snapshot() => string.Join("|", title, notes, collectionId, dueDate, hasTime, dueTime, completed, priority);
+
+    private async Task Select(TaskItem task)
+    {
+        if (task.Href == selected?.Href && !creating) return;
+        if (!await ConfirmDiscard()) return;
+        Edit(task);
+    }
+
+    private void Edit(TaskItem task)
+    {
+        selected = task;
+        creating = confirmDelete = false;
+        editError = null;
+        title = task.Title == "(no title)" ? "" : task.Title;
+        notes = task.Notes ?? "";
+        collectionId = task.CollectionId;
+        completed = task.Completed;
+        priority = task.Priority;
+        hasTime = task.Due != null && !task.DueIsDate;
+        dueTime = new TimeOnly(9, 0);
+        dueDate = DueDay(task);
+        if (hasTime) dueTime = TimeOnly.FromDateTime(TimeZoneInfo.ConvertTime(task.Due!.Value, State.TimeZone).DateTime);
+        initial = Snapshot();
+    }
+
+    private async Task StartNew()
+    {
+        if (!await ConfirmDiscard()) return;
+        selected = null;
+        creating = true;
+        confirmDelete = false;
+        editError = null;
+        title = notes = "";
+        collectionId = QuickList ?? "";
+        dueDate = null;
+        hasTime = completed = false;
+        dueTime = new TimeOnly(9, 0);
+        priority = TaskPriority.None;
+        initial = Snapshot();
+        focusTitle = true;
+    }
+
+    private void ClearDue()
+    {
+        dueDate = null;
+        hasTime = false;
+    }
+
+    private async Task Back()
+    {
+        if (!await ConfirmDiscard()) return;
+        selected = null;
+        creating = false;
+        initial = Snapshot();
+    }
+
+    private async Task<bool> ConfirmDiscard() =>
+        Snapshot() == initial || !(creating || selected != null)
+        || await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard your unsaved changes to this task?");
+
+    private async Task Save()
+    {
+        if (string.IsNullOrWhiteSpace(title)) { editError = "Give the task a title."; return; }
+        if (string.IsNullOrEmpty(collectionId)) { editError = "Choose a list."; return; }
+        DateTime? due = dueDate?.ToDateTime(hasTime ? dueTime : TimeOnly.MinValue);
+        var edit = new TaskEdit(title, notes, due, due != null && hasTime, completed, priority);
+        busy = true;
+        editError = null;
+        try
+        {
+            var href = await Dav.SaveTaskAsync(creating ? null : selected, edit, collectionId, State.TimeZone);
+            State.ShowToast(creating ? "Task added" : "Task saved");
+            list = await Dav.GetTasksAsync(State.TimeZone);
+            var saved = list?.Tasks.FirstOrDefault(t => t.Href == href);
+            if (saved != null) Edit(saved);
+            else { creating = false; selected = null; initial = Snapshot(); }
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException)
+        {
+            editError = ex.Message;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            editError = ex is TaskCanceledException ? "The server did not respond in time." : $"Could not reach the server: {ex.Message}";
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task Delete()
+    {
+        if (selected == null) return;
+        busy = true;
+        try
+        {
+            await Dav.DeleteTaskAsync(selected);
+            State.ShowToast("Task deleted");
+            selected = null;
+            confirmDelete = false;
+            initial = Snapshot();
+            list = await Dav.GetTasksAsync(State.TimeZone);
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            editError = $"Couldn't delete: {ex.Message}";
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task CreateList()
+    {
+        creatingList = true;
+        try
+        {
+            await Dav.CreateCollectionAsync("Tasks", CalDavAccountService.TaskComponent);
+            State.ShowToast("Task list created");
+            await Load(refresh: true);
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            State.ShowToast($"Couldn't create a task list: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            creatingList = false;
+        }
+    }
+
+    private void OpenSettings()
+    {
+        State.ActiveTab = "settings";
+        State.NotifyStateChanged();
+    }
+}

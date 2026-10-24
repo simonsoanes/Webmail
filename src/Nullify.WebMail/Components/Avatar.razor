@@ -1,0 +1,16 @@
+@using Nullify.WebMail.Services
+
+@if (Contact.Photo != null)
+{
+    <img class="avatar @(Large ? "xl" : "")" src="@Contact.Photo" alt="" />
+}
+else
+{
+    var a = new MailFormat.Address(Contact.FullName, Contact.Email ?? "");
+    <span class="avatar @(Large ? "xl" : "")" style="--hue:@MailFormat.AvatarHue(a)">@MailFormat.Initials(a)</span>
+}
+
+@code {
+    [Parameter, EditorRequired] public ContactInfo Contact { get; set; } = null!;
+    [Parameter] public bool Large { get; set; }
+}

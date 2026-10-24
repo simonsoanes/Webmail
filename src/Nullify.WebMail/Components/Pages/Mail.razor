@@ -1,0 +1,266 @@
+@using Nullify.WebMail.Services
+@inject ApiService Api
+@inject AppState State
+@inject MailActions Actions
+@inject IJSRuntime JS
+@inject WebDavService Documents
+@inject BrandingService Branding
+@implements IAsyncDisposable
+
+<PageTitle>@PageTitleText</PageTitle>
+
+<div class="app-shell">
+    <aside class="sidebar @(sidebarOpen ? "open" : "")">
+        <Sidebar OnNavigate="CloseSidebar" />
+    </aside>
+    <div class="splitter" data-resize="sidebar" role="separator" aria-orientation="vertical" tabindex="0"
+         aria-label="Resize sidebar" title="Drag to resize · double-click to reset"></div>
+    <div class="sidebar-backdrop @(sidebarOpen ? "open" : "")" @onclick="CloseSidebar"></div>
+
+    <div class="main-area">
+        @if (State.ActiveTab == "mail")
+        {
+            <section class="list-pane">
+                <MessageList OnMenu="ToggleSidebar" />
+            </section>
+            <div class="splitter" data-resize="list" role="separator" aria-orientation="vertical" tabindex="0"
+                 aria-label="Resize message list" title="Drag to resize · double-click to reset"></div>
+
+            <section class="detail-panel @(HasDetail ? "mobile-visible" : "desktop-empty")">
+                @if (State.ShowCompose)
+                {
+                    <Compose @key="composeKey" />
+                }
+                else if (State.SelectedMessageUid != null && State.SelectedFolder != null)
+                {
+                    <MessagePreview />
+                }
+                else
+                {
+                    <div class="empty-state">
+                        <div class="empty-icon"><Icon Name="mail-open" Size="26" /></div>
+                        <h3>No message selected</h3>
+                        <p>Choose a message from the list to read it here.</p>
+                        <p class="kbd-hint">Press <kbd>?</kbd> for keyboard shortcuts</p>
+                    </div>
+                }
+            </section>
+        }
+        else
+        {
+            <div class="page-pane @(State.ActiveTab is "contacts" or "tasks" or "notes" or "documents" ? "fill" : "")">
+                <div class="pane-toolbar show-menu" style="display:none;">
+                    <button class="icon-btn" @onclick="ToggleSidebar" title="Menu"><Icon Name="menu" /></button>
+                </div>
+                @switch (State.ActiveTab)
+                {
+                    case "calendar": <CalendarView /> break;
+                    case "tasks": <TasksView /> break;
+                    case "contacts": <ContactView /> break;
+                    case "notes": <NotesView /> break;
+                    case "documents": <DocumentsView /> break;
+                    case "settings": <SettingsView /> break;
+                    case "admin": <AdminPanel /> break;
+                }
+            </div>
+        }
+
+        <nav class="mobile-tabs">
+            @foreach (var (tab, icon, label) in Tabs())
+            {
+                <button class="mobile-tab @(State.ActiveTab == tab ? "active" : "")" @onclick="() => SetTab(tab)">
+                    <Icon Name="@icon" Size="20" />
+                    <span>@label</span>
+                </button>
+            }
+        </nav>
+    </div>
+
+    @if (showShortcuts)
+    {
+        <div class="menu-backdrop" style="background:rgba(10,12,16,.45);z-index:300;display:grid;place-items:center;padding:1rem;"
+             @onclick="() => showShortcuts = false">
+            <div class="card" style="max-width:560px;width:100%;margin:0;box-shadow:var(--shadow-lg);" @onclick:stopPropagation="true">
+                <div class="card-head">
+                    <div class="icon-tile"><Icon Name="keyboard" /></div>
+                    <h3 style="flex:1;">Keyboard shortcuts</h3>
+                    <button class="icon-btn" @onclick="() => showShortcuts = false" title="Close"><Icon Name="x" /></button>
+                </div>
+                <ShortcutList />
+            </div>
+        </div>
+    }
+
+    <div class="toasts" role="status" aria-live="polite">
+        @foreach (var toast in State.Toasts)
+        {
+            <div class="toast @(toast.IsError ? "error" : "")">
+                <span>@toast.Message</span>
+                <span class="spacer"></span>
+                <button @onclick="() => State.DismissToast(toast.Id)" title="Dismiss"><Icon Name="x" Size="15" /></button>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    private bool sidebarOpen;
+    private bool showShortcuts;
+    private int composeKey;
+    private DotNetObjectReference<Mail>? selfRef;
+    private CancellationTokenSource? updateDebounce;
+
+    private string PageTitleText
+    {
+        get
+        {
+            var inbox = State.FindSpecialFolder("Inbox");
+            var unread = inbox?.UnreadMessages ?? 0;
+            var app = $"{State.BrandTitle} WebMail";
+            return unread > 0 ? $"Inbox ({unread}) · {app}" : app;
+        }
+    }
+
+    private bool HasDetail => State.ShowCompose || State.SelectedMessageUid != null;
+
+    private IEnumerable<(string Tab, string Icon, string Label)> Tabs()
+    {
+        yield return ("mail", "mail", "Mail");
+        yield return ("calendar", "calendar", "Calendar");
+        yield return ("tasks", "tasks", "Tasks");
+        yield return ("contacts", "users", "Contacts");
+        yield return ("notes", "notebook", "Notes");
+        if (State.DocumentsAvailable) yield return ("documents", "folder", "Docs");
+        yield return ("settings", "settings", "Settings");
+        if (State.IsAdmin) yield return ("admin", "shield", "Admin");
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        State.StateChanged += OnStateChanged;
+        State.ComposeOpened += OnComposeOpened;
+        try
+        {
+            foreach (var p in await Api.GetPreferencesAsync())
+            {
+                if (p.Key == "compose.signature") State.Signature = p.Value ?? "";
+                if (p.Key == "compose.font") State.ComposeFont = p.Value ?? "sans-serif";
+            }
+        }
+        catch { /* defaults */ }
+        try { State.DocumentsAvailable = await Documents.IsAvailableAsync(); }
+        catch { /* menu stays hidden */ }
+        try { State.BrandTitle = await Branding.TitleAsync(); }
+        catch { /* default title */ }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        selfRef = DotNetObjectReference.Create(this);
+        try
+        {
+            var tz = await JS.InvokeAsync<string>("nullifyApp.init", selfRef);
+            if (!string.IsNullOrEmpty(tz) && TimeZoneInfo.TryFindSystemTimeZoneById(tz, out var zone))
+            {
+                State.TimeZone = zone;
+                State.NotifyStateChanged();
+            }
+        }
+        catch (JSDisconnectedException) { }
+    }
+
+    private void OnComposeOpened() => composeKey++;
+
+    private async void OnStateChanged() => await InvokeAsync(StateHasChanged);
+
+    private void SetTab(string tab)
+    {
+        State.ActiveTab = tab;
+        State.ShowCompose = false;
+        if (tab != "mail") State.SelectedMessageUid = null;
+        sidebarOpen = false;
+        State.NotifyStateChanged();
+    }
+
+    private void ToggleSidebar() => sidebarOpen = !sidebarOpen;
+    private void CloseSidebar() => sidebarOpen = false;
+
+    [JSInvokable]
+    public async Task OnShortcut(string key)
+    {
+        await InvokeAsync(async () =>
+        {
+            if (key == "escape")
+            {
+                if (showShortcuts) showShortcuts = false;
+                else if (sidebarOpen) sidebarOpen = false;
+                else if (!State.ShowCompose && State.SelectedMessageUid != null)
+                {
+                    State.SelectedMessageUid = null;
+                    State.NotifyStateChanged();
+                }
+                StateHasChanged();
+                return;
+            }
+            if (key == "send")
+            {
+                if (State.SendHandler != null) await State.SendHandler();
+                return;
+            }
+            if (key == "?") { showShortcuts = !showShortcuts; StateHasChanged(); return; }
+            if (key == "c") { SetTab("mail"); State.StartCompose(ComposeMode.New); return; }
+
+            if (State.ActiveTab != "mail" || State.ShowCompose) return;
+            var open = State.SelectedMessageUid;
+            IReadOnlyCollection<long> targets = State.CheckedUids.Count > 0 ? State.CheckedUids.ToList()
+                : open is { } o ? [o] : [];
+
+            switch (key)
+            {
+                case "j" or "ArrowDown": Actions.SelectRelative(1); break;
+                case "k" or "ArrowUp": Actions.SelectRelative(-1); break;
+                case "r" when open != null: State.StartCompose(ComposeMode.Reply, State.SelectedFolder, open); break;
+                case "a" when open != null: State.StartCompose(ComposeMode.ReplyAll, State.SelectedFolder, open); break;
+                case "f" when open != null: State.StartCompose(ComposeMode.Forward, State.SelectedFolder, open); break;
+                case "s" when open != null: await Actions.ToggleFlaggedAsync(open.Value); break;
+                case "u" when targets.Count > 0:
+                    var anyUnread = targets.Any(u => Actions.Find(u) is { IsSeen: false });
+                    await Actions.SetSeenAsync(targets, anyUnread);
+                    break;
+                case "e" when targets.Count > 0: await Actions.ArchiveAsync(targets); State.CheckedUids.Clear(); break;
+                case "#" or "Delete" when targets.Count > 0: await Actions.DeleteAsync(targets); State.CheckedUids.Clear(); break;
+            }
+            await JS.InvokeVoidAsync("nullifyApp.scrollIntoView", ".msg-row.active");
+        });
+    }
+
+    /// <summary>IMAP IDLE push via SSE; debounced because our own flag changes echo back too.</summary>
+    [JSInvokable]
+    public void OnMailboxUpdate()
+    {
+        updateDebounce?.Cancel();
+        updateDebounce = new CancellationTokenSource();
+        var token = updateDebounce.Token;
+        _ = Task.Delay(1500, token).ContinueWith(t =>
+        {
+            if (t.IsCanceled) return;
+            InvokeAsync(() =>
+            {
+                State.FoldersVersion++;
+                if (State.SelectedFolder == "INBOX" && State.CurrentPage == 0 && !State.IsSearching)
+                    State.ListVersion++;
+                State.NotifyStateChanged();
+            });
+        }, TaskScheduler.Default);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        State.StateChanged -= OnStateChanged;
+        State.ComposeOpened -= OnComposeOpened;
+        updateDebounce?.Cancel();
+        try { await JS.InvokeVoidAsync("nullifyApp.dispose"); } catch { /* circuit gone */ }
+        selfRef?.Dispose();
+    }
+}

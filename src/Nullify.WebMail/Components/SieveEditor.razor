@@ -1,0 +1,234 @@
+@using Nullify.WebMail.Services
+@inject ApiService Api
+@inject AppState State
+@inject IJSRuntime JS
+
+<div class="sieve-page">
+    <div class="sieve-toolbar">
+        @if (selected != null)
+        {
+            @if (isNew)
+            {
+                <input @bind="newName" @bind:event="oninput" placeholder="Script name" style="height:28px;width:160px;font-size:.84rem;" />
+            }
+            else
+            {
+                <strong style="font-size:.88rem;">@selected.Name</strong>
+                @if (selected.IsActive) { <span class="tag" style="background:var(--ok-bg);color:var(--ok-text);">Active</span> }
+            }
+            <div class="segmented" role="tablist" aria-label="Editor mode">
+                <button role="tab" class="@(rules != null ? "on" : "")" aria-selected="@(rules != null)" @onclick="ShowRules"><Icon Name="filter" Size="14" /> Rules</button>
+                <button role="tab" class="@(rules == null ? "on" : "")" aria-selected="@(rules == null)" @onclick="ShowScript"><Icon Name="code" Size="14" /> Script</button>
+            </div>
+        }
+        <span class="spacer"></span>
+        <button class="icon-btn small" @onclick="RefreshScripts" title="Refresh"><Icon Name="refresh" Size="15" /></button>
+        <button class="btn small" @onclick="NewScript"><Icon Name="plus" Size="14" /> New</button>
+        @if (selected != null)
+        {
+            <button class="btn small accent" @onclick="SaveScript" disabled="@busy">Save</button>
+            @if (!isNew && !selected.IsActive)
+            {
+                <button class="btn small" @onclick="ActivateScript" disabled="@busy">Activate</button>
+            }
+            @if (!isNew)
+            {
+                <button class="icon-btn small" @onclick="DeleteScript" title="Delete script"><Icon Name="trash" Size="15" /></button>
+            }
+        }
+    </div>
+    <div class="sieve-editor-area">
+        <div class="sieve-scripts-sidebar">
+            @if (scripts == null)
+            {
+                <div class="muted" style="padding:.5rem;font-size:.84rem;">Loading…</div>
+            }
+            else if (scripts.Count == 0)
+            {
+                <div class="muted" style="padding:.5rem;font-size:.84rem;">No scripts yet</div>
+            }
+            else
+            {
+                @foreach (var s in scripts)
+                {
+                    var script = s;
+                    <div class="sieve-script-item @(selected?.Name == script.Name && !isNew ? "active" : "")"
+                         @onclick="() => SelectScript(script.Name)">
+                        @script.Name @if (script.IsActive) { <span title="Active">●</span> }
+                    </div>
+                }
+            }
+        </div>
+        @if (selected == null)
+        {
+            <div class="empty-state">
+                <p>@(loadError ?? "Select a script, or create a new one.")</p>
+            </div>
+        }
+        else if (rules != null)
+        {
+            <div class="sieve-rules-pane">
+                @if (dropsComments)
+                {
+                    <div class="sieve-note">Saving from the rule editor removes the comments in this script. Switch to Script to keep them.</div>
+                }
+                <SieveRuleEditor Rules="rules" Folders="folderNames" />
+            </div>
+        }
+        else
+        {
+            <div class="sieve-script-pane">
+                @if (rulesError != null)
+                {
+                    <div class="sieve-note">@rulesError Edit it here instead.</div>
+                }
+                <textarea @bind="editorContent" @bind:event="oninput" spellcheck="false" aria-label="Sieve script"></textarea>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    private IReadOnlyList<SieveScriptDto>? scripts;
+    private SieveScriptDto? selected;
+    private bool isNew;
+    private string newName = "";
+    private string editorContent = "";
+    private string? loadError;
+    private bool busy;
+
+    // Rules mode when non-null; the textarea (editorContent) is the source of truth otherwise.
+    private List<SieveRule>? rules;
+    private string? rulesError;
+    private bool dropsComments;
+
+    private IReadOnlyList<string> folderNames =>
+        MailFormat.OrderFolders(State.Folders).Select(f => f.Name).ToList();
+
+    protected override async Task OnInitializedAsync() => await RefreshScripts();
+
+    private async Task RefreshScripts()
+    {
+        scripts = await Api.GetSieveScriptsAsync();
+        loadError = scripts.Count == 0 ? "No scripts found, or the Sieve server is unreachable." : null;
+    }
+
+    private async Task SelectScript(string name)
+    {
+        try
+        {
+            selected = await Api.GetSieveScriptAsync(name);
+            editorContent = selected?.Content ?? "";
+            isNew = false;
+            LoadRules(fromUser: false);
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Could not open script: {ex.Message}", isError: true);
+        }
+    }
+
+    /// <summary>Parses the script text into rules; on failure stays in (or drops back to) script mode.</summary>
+    private void LoadRules(bool fromUser)
+    {
+        var result = string.IsNullOrWhiteSpace(editorContent)
+            ? new SieveParseResult([], null)
+            : SieveRuleParser.Parse(editorContent);
+        rules = result.Rules;
+        dropsComments = result.DropsComments;
+        rulesError = result.Error;
+        if (fromUser && result.Error != null)
+            State.ShowToast($"Can't show this script as rules: {result.Error}", isError: true);
+    }
+
+    private void ShowRules()
+    {
+        if (rules == null) LoadRules(fromUser: true);
+    }
+
+    private void ShowScript()
+    {
+        if (rules == null) return;
+        editorContent = SieveRuleWriter.Write(rules);
+        rules = null;
+        rulesError = null;
+    }
+
+    private string CurrentContent => rules != null ? SieveRuleWriter.Write(rules) : editorContent;
+
+    private void NewScript()
+    {
+        isNew = true;
+        newName = scripts?.Count > 0 ? "" : "main";
+        selected = new SieveScriptDto("", false, "");
+        editorContent = "";
+        rules = [];
+        rulesError = null;
+        dropsComments = false;
+    }
+
+    private async Task SaveScript()
+    {
+        if (selected == null) return;
+        var name = isNew ? newName.Trim() : selected.Name;
+        if (name.Length == 0)
+        {
+            State.ShowToast("Give the script a name first.", isError: true);
+            return;
+        }
+        busy = true;
+        try
+        {
+            await Api.PutSieveScriptAsync(name, CurrentContent);
+            State.ShowToast($"Saved \"{name}\"");
+            var keepScriptMode = rules == null;
+            await RefreshScripts();
+            await SelectScript(name);
+            if (keepScriptMode) ShowScript();
+        }
+        catch (Exception ex)
+        {
+            // ManageSieve validates on PUTSCRIPT, so syntax errors surface here.
+            State.ShowToast($"Save failed: {ex.Message}", isError: true);
+        }
+        finally { busy = false; }
+    }
+
+    private async Task ActivateScript()
+    {
+        if (selected == null) return;
+        busy = true;
+        try
+        {
+            await Api.ActivateSieveScriptAsync(selected.Name);
+            State.ShowToast($"\"{selected.Name}\" is now active");
+            await RefreshScripts();
+            // Keep any unsaved edits rather than reloading the script.
+            selected = selected with { IsActive = true };
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Could not activate: {ex.Message}", isError: true);
+        }
+        finally { busy = false; }
+    }
+
+    private async Task DeleteScript()
+    {
+        if (selected == null) return;
+        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Delete the script \"{selected.Name}\"?")) return;
+        try
+        {
+            await Api.DeleteSieveScriptAsync(selected.Name);
+            State.ShowToast($"Deleted \"{selected.Name}\"");
+            selected = null;
+            editorContent = "";
+            rules = null;
+            await RefreshScripts();
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Delete failed: {ex.Message}", isError: true);
+        }
+    }
+}

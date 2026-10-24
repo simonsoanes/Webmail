@@ -1,0 +1,510 @@
+@using Nullify.WebMail.Services
+@inject CalDavAccountService CalDav
+@inject ApiService Api
+@inject AppState State
+
+<div class="calendar-page">
+    <div class="page-head">
+        <h2>@currentMonth.ToString("MMMM yyyy", Inv)</h2>
+        @if (loading) { <span class="spinner" style="color:var(--muted);" aria-label="Loading"></span> }
+        <span class="spacer"></span>
+        <button class="icon-btn" @onclick="Refresh" title="Refresh" disabled="@loading"><Icon Name="refresh" Size="17" /></button>
+        <button class="btn small" @onclick="Today">Today</button>
+        <span class="btn-group">
+            <button class="icon-btn" @onclick="() => Move(-1)" title="Previous month"><Icon Name="chevron-left" /></button>
+            <button class="icon-btn" @onclick="() => Move(1)" title="Next month"><Icon Name="chevron-right" /></button>
+        </span>
+        @if (status == Status.Ready && calendars.Count > 0)
+        {
+            <button class="btn accent small" @onclick="() => NewEvent(selectedDay)"><Icon Name="plus" Size="14" /> New event</button>
+        }
+    </div>
+
+    @switch (status)
+    {
+        case Status.NotConfigured:
+            <div class="notice">
+                <Icon Name="calendar" Size="16" />
+                <span>No calendar server is set up for your account.</span>
+                <span class="spacer"></span>
+                <button class="btn small" @onclick="OpenSettings">Set up CalDAV</button>
+            </div>
+            break;
+        case Status.NeedsReentry:
+            <div class="alert warn" role="alert">
+                <Icon Name="lock" Size="15" />
+                <div>Your saved CalDAV password needs to be entered again because your mail password changed.
+                    <button class="link-btn" @onclick="OpenSettings">Open calendar settings</button></div>
+            </div>
+            break;
+        case Status.Error:
+            <div class="alert err" role="alert">
+                <Icon Name="alert" Size="15" />
+                <div>Couldn't load your calendar: @error
+                    <button class="link-btn" @onclick="OpenSettings">Check settings</button></div>
+            </div>
+            break;
+    }
+    @foreach (var e in partialErrors)
+    {
+        <div class="alert warn"><Icon Name="alert" Size="15" /><div>@e</div></div>
+    }
+
+    <div class="cal-layout">
+        @if (calendars.Count > 0)
+        {
+            <section class="cal-filters" aria-label="Calendars">
+                <div class="cal-filters-head">
+                    <h3>Calendars</h3>
+                    @if (hidden.Count > 0)
+                    {
+                        <button class="link-btn" @onclick="ShowAll">Show all</button>
+                    }
+                </div>
+                <div class="cal-filter-list">
+                    @foreach (var c in calendars)
+                    {
+                        var cal = c;
+                        var shown = !hidden.Contains(cal.Id);
+                        var count = CountIn(cal.Id);
+                        <button class="cal-filter @(shown ? "on" : "off")" style="--cal:@ColorOf(cal.Id)" role="switch" aria-checked="@shown"
+                                @onclick="() => ToggleCalendar(cal.Id)" title="@(shown ? "Hide" : "Show") @cal.Name">
+                            <span class="cal-check" aria-hidden="true"><Icon Name="check" Size="12" /></span>
+                            <span class="cal-name">@cal.Name</span>
+                            <span class="cal-count" title="@count event@(count == 1 ? "" : "s") this view">@count</span>
+                        </button>
+                    }
+                </div>
+            </section>
+        }
+
+        <div class="calendar-grid">
+            @foreach (var day in WeekdayNames)
+            {
+                <div class="calendar-header-cell">@day</div>
+            }
+            @foreach (var date in days)
+            {
+                var d = date;
+                var dayEvents = EventsOn(d);
+                <div class="calendar-cell @(d.Month == currentMonth.Month ? "" : "muted") @(d == today ? "today" : "") @(d == selectedDay ? "selected" : "")"
+                     @onclick="() => SelectDay(d)" @ondblclick="() => NewEvent(d)" role="button" tabindex="0"
+                     aria-label="@d.ToString("dddd d MMMM", Inv), @dayEvents.Count event@(dayEvents.Count == 1 ? "" : "s")">
+                    <div class="cell-head">
+                        <span class="day-num">@d.Day</span>
+                        @if (status == Status.Ready && calendars.Count > 0)
+                        {
+                            <button class="cell-add" title="Add an event on @d.ToString("d MMMM", Inv)"
+                                    @onclick="() => NewEvent(d)" @onclick:stopPropagation="true"><Icon Name="plus" Size="13" /></button>
+                        }
+                    </div>
+                    <div class="cell-events">
+                        @foreach (var ev in dayEvents.Take(MaxChips))
+                        {
+                            var item = ev;
+                            <button class="ev-chip @(item.AllDay ? "allday" : "")" style="--cal:@ColorOf(item.CalendarId)"
+                                    title="@ChipTitle(item)" @onclick="() => OpenEvent(d, item)" @ondblclick="() => EditEvent(item)"
+                                    @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">
+                                @if (!item.AllDay) { <span class="ev-time">@Local(item.Start).ToString("HH:mm")</span> }
+                                <span class="ev-title">@item.Summary</span>
+                            </button>
+                        }
+                        @if (dayEvents.Count > MaxChips)
+                        {
+                            <span class="ev-more">+@(dayEvents.Count - MaxChips) more</span>
+                        }
+                    </div>
+                    @if (dayEvents.Count > 0)
+                    {
+                        <span class="ev-dots" aria-hidden="true">
+                            @foreach (var ev in dayEvents.Take(4)) { <i style="--cal:@ColorOf(ev.CalendarId)"></i> }
+                        </span>
+                    }
+                </div>
+            }
+        </div>
+
+        <aside class="agenda" aria-label="Events on the selected day">
+            <div class="agenda-header">
+                <h3>@selectedDay.ToString("dddd d MMMM", Inv)</h3>
+                @if (status == Status.Ready && calendars.Count > 0)
+                {
+                    <button class="icon-btn small" title="Add an event on this day" @onclick="() => NewEvent(selectedDay)"><Icon Name="plus" Size="15" /></button>
+                }
+            </div>
+            @{ var selectedEvents = EventsOn(selectedDay); }
+            @if (status == Status.Loading && events.Count == 0)
+            {
+                <div class="skeleton line" style="width:70%;"></div>
+                <div class="skeleton line" style="width:50%;"></div>
+            }
+            else if (selectedEvents.Count == 0)
+            {
+                <p class="muted">Nothing scheduled.</p>
+            }
+            else
+            {
+                @foreach (var ev in selectedEvents)
+                {
+                    var item = ev;
+                    var open = openEvent == item;
+                    <div class="agenda-item @(open ? "open" : "")" style="--cal:@ColorOf(item.CalendarId)">
+                        <button class="agenda-head" @onclick="() => openEvent = open ? null : item" aria-expanded="@open">
+                            <span class="agenda-time">@TimeRange(item, selectedDay)@if (item.IsRecurring) { <Icon Name="refresh" Size="11" Class="inline-icon" /> }</span>
+                            <span class="agenda-title">@item.Summary</span>
+                            @if (item.Location != null)
+                            {
+                                <span class="agenda-loc">@item.Location</span>
+                            }
+                        </button>
+                        @if (open)
+                        {
+                            <div class="agenda-detail">
+                                <div class="muted">@CalendarName(item.CalendarId) · @FullRange(item)</div>
+                                @if (item.Description != null)
+                                {
+                                    <div class="msg-body-text">@((MarkupString)MailFormat.TextToHtml(item.Description))</div>
+                                }
+                                @if (item.Href != null)
+                                {
+                                    <div><button class="btn small" @onclick="() => EditEvent(item)"><Icon Name="pen" Size="14" /> Edit</button></div>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+            }
+        </aside>
+    </div>
+</div>
+
+@if (editorOpen)
+{
+    <EventEditor @key="editorKey" Event="editing" Calendars="calendars" ColorOf="ColorOf"
+                 DefaultCalendarId="@DefaultCalendar" Day="editorDay" Zone="State.TimeZone"
+                 OnSave="SaveEvent" OnDelete="DeleteEvent" OnClose="CloseEditor" />
+}
+
+@code {
+    private enum Status { Loading, Ready, NotConfigured, NeedsReentry, Error }
+
+    private static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+    private const int MaxChips = 3;
+    private const string HiddenPref = "calendar.hidden";
+    private static readonly string[] WeekdayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    // Used when a calendar doesn't publish its own colour.
+    private static readonly string[] Palette = ["#3b5bdb", "#0ca678", "#e8590c", "#ae3ec9", "#1098ad", "#d6336c", "#5c940d", "#f08c00"];
+
+    private DateOnly currentMonth;
+    private DateOnly today;
+    private DateOnly selectedDay;
+    private readonly List<DateOnly> days = new();
+    private IReadOnlyList<CalendarEvent> events = Array.Empty<CalendarEvent>();
+    private IReadOnlyList<CalendarInfo> calendars = Array.Empty<CalendarInfo>();
+    private IReadOnlyList<string> partialErrors = Array.Empty<string>();
+    private readonly HashSet<string> hidden = new();
+    private Dictionary<DateOnly, List<CalendarEvent>> byDay = new();
+    private CalendarEvent? openEvent;
+    private Status status = Status.Loading;
+    private string? error;
+    private bool loading;
+    private int loadToken;
+
+    // editor
+    private bool editorOpen;
+    private CalendarEvent? editing;
+    private DateOnly editorDay;
+    private int editorKey;
+
+    /// <summary>New events go to the first visible calendar.</summary>
+    private string? DefaultCalendar => calendars.FirstOrDefault(c => !hidden.Contains(c.Id))?.Id ?? calendars.FirstOrDefault()?.Id;
+
+    protected override async Task OnInitializedAsync()
+    {
+        today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, State.TimeZone).DateTime);
+        currentMonth = new DateOnly(today.Year, today.Month, 1);
+        selectedDay = today;
+        try
+        {
+            var pref = (await Api.GetPreferencesAsync()).FirstOrDefault(p => p.Key == HiddenPref)?.Value;
+            if (!string.IsNullOrEmpty(pref)) hidden.UnionWith(pref.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+        }
+        catch { /* show everything */ }
+        BuildGrid();
+        await Load();
+    }
+
+    private void BuildGrid()
+    {
+        days.Clear();
+        var start = currentMonth.AddDays(-(((int)currentMonth.DayOfWeek + 6) % 7)); // Monday start
+        for (var i = 0; i < 42; i++) days.Add(start.AddDays(i));
+    }
+
+    private async Task Load()
+    {
+        var token = ++loadToken;
+        loading = true;
+        StateHasChanged();
+        var tz = State.TimeZone;
+        var first = days[0].ToDateTime(TimeOnly.MinValue);
+        var from = new DateTimeOffset(first, tz.GetUtcOffset(first));
+        var last = days[^1].AddDays(1).ToDateTime(TimeOnly.MinValue);
+        var to = new DateTimeOffset(last, tz.GetUtcOffset(last));
+        try
+        {
+            var range = await CalDav.GetEventsAsync(from, to, tz);
+            if (token != loadToken) return;
+            if (range == null)
+            {
+                status = Status.NotConfigured;
+                events = Array.Empty<CalendarEvent>();
+                calendars = Array.Empty<CalendarInfo>();
+            }
+            else
+            {
+                status = Status.Ready;
+                events = range.Events;
+                calendars = range.Calendars;
+                partialErrors = range.Errors;
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            if (token != loadToken) return;
+            status = Status.NeedsReentry;
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException)
+        {
+            if (token != loadToken) return;
+            status = Status.Error;
+            error = ex is TaskCanceledException ? "the server did not respond in time." : ex.Message;
+        }
+        finally
+        {
+            if (token == loadToken) loading = false;
+        }
+        Index();
+        // Keep the expanded agenda item across reloads (it's a new object after a refetch).
+        if (openEvent != null)
+            openEvent = events.FirstOrDefault(e => e.Uid == openEvent.Uid && e.OccurrenceId == openEvent.OccurrenceId);
+    }
+
+    /// <summary>Bucket visible events by local day; multi-day events appear on each day they cover.</summary>
+    private void Index()
+    {
+        byDay = new();
+        foreach (var ev in events.Where(e => !hidden.Contains(e.CalendarId ?? "")))
+        {
+            var (startDay, endDay) = DaysOf(ev);
+            for (var d = startDay; d <= endDay && d <= days[^1]; d = d.AddDays(1))
+            {
+                if (d < days[0]) { d = days[0].AddDays(-1); continue; }
+                if (!byDay.TryGetValue(d, out var list)) byDay[d] = list = new();
+                list.Add(ev);
+            }
+        }
+        foreach (var list in byDay.Values)
+            list.Sort((a, b) => a.AllDay != b.AllDay ? (a.AllDay ? -1 : 1) : a.Start.CompareTo(b.Start));
+    }
+
+    private (DateOnly Start, DateOnly End) DaysOf(CalendarEvent ev)
+    {
+        DateOnly startDay, endDay;
+        if (ev.AllDay)
+        {
+            startDay = DateOnly.FromDateTime(ev.Start.UtcDateTime);
+            endDay = DateOnly.FromDateTime(ev.End.UtcDateTime).AddDays(-1); // DTEND is exclusive
+        }
+        else
+        {
+            var s = Local(ev.Start);
+            var e = Local(ev.End);
+            startDay = DateOnly.FromDateTime(s);
+            endDay = DateOnly.FromDateTime(e > s ? e.AddTicks(-1) : s);
+        }
+        return (startDay, endDay < startDay ? startDay : endDay);
+    }
+
+    private List<CalendarEvent> EventsOn(DateOnly d) => byDay.TryGetValue(d, out var list) ? list : [];
+
+    /// <summary>Events from a calendar in the visible weeks (shown on its filter, even when hidden).</summary>
+    private int CountIn(string calendarId) => events.Count(e => e.CalendarId == calendarId);
+
+    private DateTime Local(DateTimeOffset t) => TimeZoneInfo.ConvertTime(t, State.TimeZone).DateTime;
+
+    private string ColorOf(string? calendarId)
+    {
+        var index = calendars.ToList().FindIndex(c => c.Id == calendarId);
+        if (index < 0) return Palette[0];
+        return calendars[index].Color ?? Palette[index % Palette.Length];
+    }
+
+    private string CalendarName(string? id) => calendars.FirstOrDefault(c => c.Id == id)?.Name ?? "Calendar";
+
+    private string TimeRange(CalendarEvent ev, DateOnly day)
+    {
+        if (ev.AllDay) return "All day";
+        var s = Local(ev.Start);
+        var e = Local(ev.End);
+        // Multi-day timed events: show only the part on this day.
+        var startText = DateOnly.FromDateTime(s) < day ? "…" : s.ToString("HH:mm");
+        var endText = DateOnly.FromDateTime(e) > day ? "…" : e.ToString("HH:mm");
+        return e == s ? startText : $"{startText} – {endText}";
+    }
+
+    private string FullRange(CalendarEvent ev)
+    {
+        if (ev.AllDay)
+        {
+            var first = ev.Start.UtcDateTime;
+            var last = ev.End.UtcDateTime.AddDays(-1);
+            return last.Date > first.Date ? $"{first.ToString("d MMM", Inv)} – {last.ToString("d MMM", Inv)}" : first.ToString("ddd d MMM", Inv);
+        }
+        var s = Local(ev.Start);
+        var e = Local(ev.End);
+        return s.Date == e.Date
+            ? $"{s.ToString("ddd d MMM", Inv)}, {s:HH:mm}–{e:HH:mm}"
+            : $"{s.ToString("ddd d MMM HH:mm", Inv)} – {e.ToString("ddd d MMM HH:mm", Inv)}";
+    }
+
+    private string ChipTitle(CalendarEvent ev) =>
+        ev.Summary + (ev.AllDay ? "" : $" ({Local(ev.Start):HH:mm}–{Local(ev.End):HH:mm})") + (ev.Location != null ? $" · {ev.Location}" : "");
+
+    private void SelectDay(DateOnly d)
+    {
+        selectedDay = d;
+        openEvent = null;
+    }
+
+    private void OpenEvent(DateOnly d, CalendarEvent ev)
+    {
+        selectedDay = d;
+        openEvent = ev;
+    }
+
+    // ---- editing ----
+
+    private void NewEvent(DateOnly day)
+    {
+        if (status != Status.Ready || calendars.Count == 0) return;
+        selectedDay = day;
+        editing = null;
+        editorDay = day;
+        editorKey++;
+        editorOpen = true;
+    }
+
+    private void EditEvent(CalendarEvent ev)
+    {
+        if (ev.Href == null) return;
+        editing = ev;
+        editorDay = DaysOf(ev).Start;
+        editorKey++;
+        editorOpen = true;
+    }
+
+    private void CloseEditor() => editorOpen = false;
+
+    private async Task<string?> SaveEvent(EventEdit edit, string calendarId)
+    {
+        try
+        {
+            await CalDav.SaveEventAsync(editing, edit, calendarId, State.TimeZone);
+            State.ShowToast(editing == null ? "Event added" : "Event saved");
+            editorOpen = false;
+            // Show the day the event now starts on.
+            var day = DateOnly.FromDateTime(edit.StartLocal);
+            selectedDay = day;
+            if (day < days[0] || day > days[^1])
+            {
+                currentMonth = new DateOnly(day.Year, day.Month, 1);
+                BuildGrid();
+            }
+            hidden.Remove(calendarId);
+            await Load();
+            StateHasChanged(); // invoked as a plain delegate from the editor, so re-render explicitly
+            return null;
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException)
+        {
+            return ex.Message;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return ex is TaskCanceledException ? "The server did not respond in time." : $"Could not reach the server: {ex.Message}";
+        }
+    }
+
+    private async Task<string?> DeleteEvent(bool onlyThisOccurrence)
+    {
+        if (editing == null) return null;
+        try
+        {
+            await CalDav.DeleteEventAsync(editing, onlyThisOccurrence);
+            State.ShowToast(onlyThisOccurrence && editing.IsRecurring ? "Occurrence deleted" : "Event deleted");
+            editorOpen = false;
+            openEvent = null;
+            await Load();
+            StateHasChanged();
+            return null;
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            return ex.Message;
+        }
+    }
+
+    // ---- filters & navigation ----
+
+    private async Task ToggleCalendar(string id)
+    {
+        if (!hidden.Remove(id)) hidden.Add(id);
+        Index();
+        await SaveHidden();
+    }
+
+    private async Task ShowAll()
+    {
+        hidden.Clear();
+        Index();
+        await SaveHidden();
+    }
+
+    private async Task SaveHidden()
+    {
+        try { await Api.SetPreferenceAsync(HiddenPref, string.Join('\n', hidden)); }
+        catch { /* cosmetic */ }
+    }
+
+    private async Task Move(int months)
+    {
+        currentMonth = currentMonth.AddMonths(months);
+        // Keep the agenda on the same day-of-month where possible.
+        selectedDay = new DateOnly(currentMonth.Year, currentMonth.Month, Math.Min(selectedDay.Day, DateTime.DaysInMonth(currentMonth.Year, currentMonth.Month)));
+        openEvent = null;
+        BuildGrid();
+        await Load();
+    }
+
+    private async Task Today()
+    {
+        currentMonth = new DateOnly(today.Year, today.Month, 1);
+        selectedDay = today;
+        openEvent = null;
+        BuildGrid();
+        await Load();
+    }
+
+    private async Task Refresh()
+    {
+        CalDav.InvalidateCache();
+        await Load();
+    }
+
+    private void OpenSettings()
+    {
+        State.ActiveTab = "settings";
+        State.NotifyStateChanged();
+    }
+}

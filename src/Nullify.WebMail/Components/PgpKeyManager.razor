@@ -1,0 +1,381 @@
+@using Nullify.WebMail.Services
+@inject PgpService Store
+@inject PgpBrowser Pgp
+@inject AppState State
+@inject IJSRuntime JS
+
+@* OpenPGP keys. Generation, unlocking and re-protection all run in the browser; the server
+   only stores keys that are already protected by a passphrase or a security key.
+   Passphrase and secret-key fields are never bound: Blazor Server would send them to the
+   server. PgpBrowser hands the elements to the browser, which reads and clears them. *@
+
+@if (keys == null)
+{
+    <p class="muted">Loading…</p>
+}
+else
+{
+    @if (keys.Count == 0 && mode == Mode.None)
+    {
+        <div class="notice"><Icon Name="key" Size="15" /><span>You don't have an OpenPGP key yet. Create one, or import an existing key.</span></div>
+    }
+
+    @foreach (var k in keys)
+    {
+        var key = k;
+        var info = infos.GetValueOrDefault(key.Fingerprint);
+        <div class="pgp-key @(key.IsDefault ? "default" : "")">
+            <div class="pgp-key-main">
+                <div class="pgp-key-title">
+                    <strong>@key.UserId</strong>
+                    @if (key.IsDefault) { <span class="tag" style="background:var(--accent-soft);color:var(--accent);">Default</span> }
+                    @if (unlockedSet.Contains(key.Fingerprint)) { <span class="tag" style="background:var(--ok-bg);color:var(--ok-text);">Unlocked</span> }
+                    @if (info is { Expired: true }) { <span class="tag draft">Expired</span> }
+                    @if (info is { Revoked: true }) { <span class="tag draft">Revoked</span> }
+                </div>
+                <code class="fpr">@PgpFormat.Fingerprint(key.Fingerprint)</code>
+                <div class="muted pgp-key-meta">
+                    @(info?.Algorithm ?? "…") · created @key.CreatedUtc.ToString("d MMM yyyy") · @(key.ExpiresUtc is { } e ? $"expires {e:d MMM yyyy}" : "no expiry")
+                    · <span style="white-space:nowrap;"><Icon Name="@(key.Protection == PgpProtection.SecurityKey ? "shield" : "lock")" Size="12" Class="inline-icon" />
+                    @(key.Protection == PgpProtection.SecurityKey ? "security key" : "passphrase")</span>
+                </div>
+            </div>
+            <div class="pgp-key-actions">
+                @if (unlockedSet.Contains(key.Fingerprint))
+                {
+                    <button class="btn small" @onclick="() => Lock(key)"><Icon Name="lock" Size="14" /> Lock</button>
+                }
+                else
+                {
+                    <button class="btn small" @onclick="() => unlocking = key">Unlock</button>
+                }
+                <span class="menu-anchor">
+                    <button class="icon-btn small" @onclick='() => menuFor = menuFor == key.Fingerprint ? null : key.Fingerprint' title="More"><Icon Name="more" Size="16" /></button>
+                    @if (menuFor == key.Fingerprint)
+                    {
+                        <div class="menu-backdrop" @onclick="() => menuFor = null"></div>
+                        <div class="menu" role="menu">
+                            @if (!key.IsDefault) { <button class="menu-item" @onclick="() => MakeDefault(key)"><Icon Name="check" Size="15" /> Use by default</button> }
+                            <button class="menu-item" @onclick="() => ExportPublic(key)"><Icon Name="download" Size="15" /> Download public key</button>
+                            <button class="menu-item" @onclick="() => StartBackup(key)"><Icon Name="archive" Size="15" /> Back up secret key…</button>
+                            <button class="menu-item" @onclick="() => StartProtection(key)"><Icon Name="shield" Size="15" /> Change protection…</button>
+                            <button class="menu-item" style="color:var(--danger);" @onclick="() => Delete(key)"><Icon Name="trash" Size="15" /> Delete key…</button>
+                        </div>
+                    }
+                </span>
+            </div>
+        </div>
+    }
+
+    @switch (mode)
+    {
+        case Mode.Generate:
+            <div class="pgp-form">
+                <h4>Create a key</h4>
+                <QrSessionWarning />
+                <div class="field-row">
+                    <div class="field"><label for="g-name">Name</label><input id="g-name" @bind="genName" @bind:event="oninput" /></div>
+                    <div class="field"><label for="g-email">Email</label><input id="g-email" type="email" @bind="genEmail" @bind:event="oninput" /></div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="g-kind">Type</label>
+                        <select id="g-kind" @bind="genKind">
+                            <option value="curve25519">Ed25519 / Curve25519 (recommended)</option>
+                            <option value="rsa3072">RSA 3072</option>
+                            <option value="rsa4096">RSA 4096</option>
+                            <option value="p256">NIST P-256</option>
+                            <option value="p384">NIST P-384</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="g-exp">Expires</label>
+                        <select id="g-exp" @bind="genExpires">
+                            <option value="730">In 2 years</option>
+                            <option value="1825">In 5 years</option>
+                            <option value="365">In 1 year</option>
+                            <option value="0">Never</option>
+                        </select>
+                    </div>
+                </div>
+                <ProtectionChooser @ref="chooser" @bind-Choice="protection" SecurityKeyAvailable="securityKeySupported" />
+                @FormError
+                <div class="card-actions">
+                    <button class="btn" @onclick="() => mode = Mode.None" disabled="@busy">Cancel</button>
+                    <button class="btn accent" @onclick="Generate" disabled="@busy">@if (busy) { <span class="spinner"></span> } Create key</button>
+                </div>
+            </div>
+            break;
+
+        case Mode.Import:
+            <div class="pgp-form">
+                <h4>Import a secret key</h4>
+                <QrSessionWarning />
+                <p class="muted">Paste an exported secret key (<code>gpg --armor --export-secret-keys</code>), or choose its file.</p>
+                <textarea rows="5" @ref="importTextEl" spellcheck="false" placeholder="-----BEGIN PGP PRIVATE KEY BLOCK-----" class="mono-input"></textarea>
+                <label class="btn small file-picker" style="margin-top:.4rem;">
+                    <Icon Name="upload" Size="14" /> Choose file
+                    <input type="file" @ref="importFileEl" accept=".asc,.gpg,.key,.pgp,text/plain" />
+                </label>
+                <div class="field" style="margin-top:.75rem;">
+                    <label for="i-pass">Current passphrase of this key</label>
+                    <input id="i-pass" type="password" @ref="currentPassEl" autocomplete="off" placeholder="Leave empty if it has none" />
+                </div>
+                <ProtectionChooser @ref="chooser" @bind-Choice="protection" SecurityKeyAvailable="securityKeySupported" AllowKeep="true" />
+                @FormError
+                <div class="card-actions">
+                    <button class="btn" @onclick="() => mode = Mode.None" disabled="@busy">Cancel</button>
+                    <button class="btn accent" @onclick="Import" disabled="@busy">@if (busy) { <span class="spinner"></span> } Import key</button>
+                </div>
+            </div>
+            break;
+
+        case Mode.Protection or Mode.Backup when target != null:
+            <div class="pgp-form">
+                <h4>@(mode == Mode.Backup ? "Back up secret key" : "Change protection") — @target.UserId</h4>
+                <QrSessionWarning />
+                @if (mode == Mode.Backup)
+                {
+                    <p class="muted">The backup file is protected with the passphrase you choose here. Keep it somewhere safe: without it, mail encrypted to this key can't be read if this server is lost.</p>
+                }
+                @if (target.Protection == PgpProtection.Passphrase)
+                {
+                    <div class="field">
+                        <label for="p-old">Current passphrase</label>
+                        <input id="p-old" type="password" @ref="currentPassEl" autocomplete="off" />
+                    </div>
+                }
+                else
+                {
+                    <p class="muted">You'll be asked to touch your security key to unlock it.</p>
+                }
+                <ProtectionChooser @ref="chooser" @bind-Choice="protection"
+                                   SecurityKeyAvailable="@(securityKeySupported && mode == Mode.Protection)" PassphraseOnly="@(mode == Mode.Backup)" />
+                @FormError
+                <div class="card-actions">
+                    <button class="btn" @onclick="() => mode = Mode.None" disabled="@busy">Cancel</button>
+                    <button class="btn accent" @onclick="ApplyProtection" disabled="@busy">@if (busy) { <span class="spinner"></span> } @(mode == Mode.Backup ? "Download backup" : "Save")</button>
+                </div>
+            </div>
+            break;
+
+        default:
+            <div class="card-actions" style="justify-content:flex-start;">
+                <button class="btn accent" @onclick="StartGenerate"><Icon Name="plus" Size="15" /> Create key</button>
+                <button class="btn" @onclick="StartImport"><Icon Name="upload" Size="15" /> Import key</button>
+            </div>
+            break;
+    }
+
+    @if (keys.Count > 0)
+    {
+        <div class="setting-row" style="margin-top:.75rem;">
+            <div><label for="pgp-sign">Sign messages by default</label><div class="desc">Recipients can check the message came from you and wasn't changed.</div></div>
+            <input id="pgp-sign" type="checkbox" class="switch" checked="@settings.SignByDefault" @onchange="e => SaveSettings(settings with { SignByDefault = e.Value is true })" />
+        </div>
+        <div class="setting-row">
+            <div><label for="pgp-enc">Encrypt when every recipient has a key</label><div class="desc">Keys come from your contacts. You can still switch it off per message.</div></div>
+            <input id="pgp-enc" type="checkbox" class="switch" checked="@settings.EncryptWhenPossible" @onchange="e => SaveSettings(settings with { EncryptWhenPossible = e.Value is true })" />
+        </div>
+    }
+}
+
+@if (unlocking != null)
+{
+    <PgpUnlockDialog Key="unlocking" OnUnlocked="AfterUnlock" OnCancel="() => unlocking = null" />
+}
+
+@code {
+    private enum Mode { None, Generate, Import, Protection, Backup }
+
+    private IReadOnlyList<PgpKeyRecord>? keys;
+    private readonly Dictionary<string, PgpKeyInfo> infos = new();
+    private readonly HashSet<string> unlockedSet = new();
+    private PgpSettingsDto settings = new(false, true);
+    private Mode mode;
+    private PgpKeyRecord? target, unlocking;
+    private string? menuFor;
+    private bool busy, securityKeySupported;
+    private string? error;
+
+    private string genName = "", genEmail = "", genKind = "curve25519", genExpires = "730";
+    private ProtectionChooser.Option protection = ProtectionChooser.Option.Passphrase;
+    private ProtectionChooser? chooser;
+    private ElementReference importTextEl, importFileEl, currentPassEl;
+    private bool attachFile;
+
+    private RenderFragment? FormError => error == null ? null : @<div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@error</div></div>;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Reload();
+        settings = await Store.GetSettingsAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (attachFile && mode == Mode.Import)
+        {
+            attachFile = false;
+            try { await Pgp.AttachKeyFileAsync(importFileEl, importTextEl); } catch (PgpException ex) { error = ex.Message; }
+        }
+        if (!firstRender) return;
+        try { securityKeySupported = await Pgp.SecurityKeySupportedAsync(); } catch { }
+        await RefreshInfo();
+        StateHasChanged();
+    }
+
+    private async Task Reload()
+    {
+        keys = await Store.ListAsync();
+        await RefreshInfo();
+    }
+
+    private async Task RefreshInfo()
+    {
+        if (keys == null) return;
+        try
+        {
+            foreach (var k in keys)
+            {
+                if (!infos.ContainsKey(k.Fingerprint)) infos[k.Fingerprint] = (await Pgp.InspectAsync(k.PublicKey)).First();
+                if (await Pgp.IsUnlockedAsync(k.Fingerprint)) unlockedSet.Add(k.Fingerprint); else unlockedSet.Remove(k.Fingerprint);
+            }
+        }
+        catch (InvalidOperationException) { /* prerender: JS not available yet */ }
+        catch (PgpException) { }
+    }
+
+    private void Reset()
+    {
+        error = null;
+        protection = ProtectionChooser.Option.Passphrase;
+        menuFor = null;
+    }
+
+    private void StartGenerate()
+    {
+        Reset();
+        var me = MailFormat.ParseAddress(State.Session?.Email);
+        genEmail = me.Email;
+        genName = me.Name.Length > 0 ? me.Name : "";
+        mode = Mode.Generate;
+    }
+
+    private void StartImport() { Reset(); protection = ProtectionChooser.Option.Keep; mode = Mode.Import; attachFile = true; }
+    private void StartProtection(PgpKeyRecord k) { Reset(); target = k; mode = Mode.Protection; }
+    private void StartBackup(PgpKeyRecord k) { Reset(); target = k; mode = Mode.Backup; }
+
+    private async Task Generate()
+    {
+        error = null;
+        if (!genEmail.Contains('@')) { error = "Enter the email address this key is for."; return; }
+        var uid = genName.Trim().Length > 0 ? $"{genName.Trim()} <{genEmail.Trim()}>" : genEmail.Trim();
+        busy = true;
+        try
+        {
+            var g = await Pgp.GenerateAsync([uid], genKind, int.Parse(genExpires), protection.ToString(),
+                chooser?.PassphraseInput, chooser?.ConfirmInput);
+            await Store.SaveAsync(new PgpKeyRecord(g.Summary.Fingerprint, uid, g.PublicKey, g.SecretKey, g.Summary.Created, g.Summary.Expires,
+                g.Protection, g.CredentialId, g.Salt, keys!.Count == 0));
+            State.ShowToast("Key created");
+            mode = Mode.None;
+            await Reload();
+        }
+        catch (PgpException ex) { error = ex.Message; }
+        finally { busy = false; }
+    }
+
+    private async Task Import()
+    {
+        error = null;
+        busy = true;
+        try
+        {
+            var k = await Pgp.ImportAsync(keys!.Select(x => x.Fingerprint).ToList(), protection.ToString(),
+                importTextEl, currentPassEl, chooser?.PassphraseInput, chooser?.ConfirmInput);
+            var info = k.Summary;
+            await Store.SaveAsync(new PgpKeyRecord(info.Fingerprint, info.PrimaryUserId ?? "", k.PublicKey, k.SecretKey, info.Created, info.Expires,
+                k.Protection, k.CredentialId, k.Salt, keys!.Count == 0));
+            State.ShowToast("Key imported");
+            mode = Mode.None;
+            await Reload();
+        }
+        catch (PgpException ex) { error = ex.Message; }
+        finally { busy = false; }
+    }
+
+    private async Task ApplyProtection()
+    {
+        if (target == null) return;
+        error = null;
+        busy = true;
+        try
+        {
+            // The current-passphrase field is only shown for passphrase-protected keys.
+            ElementReference? current = target.Protection == PgpProtection.Passphrase ? currentPassEl : null;
+            if (mode == Mode.Backup)
+            {
+                await Pgp.BackupAsync(target, $"{Slug(target)}-secret.asc", current, chooser?.PassphraseInput, chooser?.ConfirmInput);
+                State.ShowToast("Backup downloaded");
+            }
+            else
+            {
+                var r = await Pgp.ChangeProtectionAsync(target, protection.ToString(), current, chooser?.PassphraseInput, chooser?.ConfirmInput);
+                await Store.SaveAsync(target with { SecretKey = r.SecretKey, Protection = r.Protection, CredentialId = r.CredentialId, PrfSalt = r.Salt });
+                State.ShowToast("Protection changed");
+                await Reload();
+            }
+            mode = Mode.None;
+        }
+        catch (PgpException ex) { error = ex.Message.Contains("Wrong passphrase") ? "That isn't the current passphrase." : ex.Message; }
+        finally { busy = false; }
+    }
+
+    private async Task AfterUnlock()
+    {
+        unlocking = null;
+        await RefreshInfo();
+    }
+
+    private async Task Lock(PgpKeyRecord k)
+    {
+        await Pgp.LockAsync(k.Fingerprint);
+        unlockedSet.Remove(k.Fingerprint);
+    }
+
+    private async Task MakeDefault(PgpKeyRecord k)
+    {
+        menuFor = null;
+        await Store.SetDefaultAsync(k.Fingerprint);
+        await Reload();
+    }
+
+    private async Task ExportPublic(PgpKeyRecord k)
+    {
+        menuFor = null;
+        await Pgp.DownloadAsync($"{Slug(k)}-public.asc", System.Text.Encoding.ASCII.GetBytes(k.PublicKey), "application/pgp-keys");
+    }
+
+    private async Task Delete(PgpKeyRecord k)
+    {
+        menuFor = null;
+        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm",
+                $"Delete the key for {k.UserId}?\n\nMessages encrypted to it can never be read again unless you have a backup.")) return;
+        await Pgp.LockAsync(k.Fingerprint);
+        await Store.DeleteAsync(k.Fingerprint);
+        infos.Remove(k.Fingerprint);
+        State.ShowToast("Key deleted");
+        await Reload();
+    }
+
+    private async Task SaveSettings(PgpSettingsDto s)
+    {
+        settings = s;
+        await Store.SaveSettingsAsync(s);
+    }
+
+    private static string Slug(PgpKeyRecord k) =>
+        new string((MailFormat.ParseAddress(k.UserId).Email is { Length: > 0 } e ? e : k.Fingerprint[^16..])
+            .Select(c => char.IsLetterOrDigit(c) || c is '.' or '-' or '@' ? c : '_').ToArray());
+}

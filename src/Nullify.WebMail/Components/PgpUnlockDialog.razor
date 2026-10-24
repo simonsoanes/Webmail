@@ -1,0 +1,92 @@
+@using Nullify.WebMail.Services
+@inject PgpBrowser Pgp
+
+@* Unlock one of the user's keys into browser memory (passphrase or security-key touch). *@
+<div class="modal-backdrop" @onclick="Cancel">
+    <form class="modal unlock-dialog" role="dialog" aria-modal="true" aria-labelledby="unlock-heading"
+          @onclick:stopPropagation="true" @onsubmit="UnlockWithPassphrase" @onsubmit:preventDefault="true">
+        <div class="modal-head">
+            <div class="icon-tile"><Icon Name="key" /></div>
+            <h3 id="unlock-heading">Unlock your key</h3>
+            <span class="spacer"></span>
+            <button type="button" class="icon-btn" @onclick="Cancel" title="Close"><Icon Name="x" /></button>
+        </div>
+        <div class="modal-body">
+            <p class="muted" style="margin-bottom:.75rem;">@(Reason ?? "Your OpenPGP key is needed for this.")</p>
+            <div class="key-chip">
+                <span class="key-uid">@Key.UserId</span>
+                <code>@PgpFormat.Fingerprint(Key.Fingerprint)</code>
+            </div>
+            <QrSessionWarning SecurityKey="@(Key.Protection == PgpProtection.SecurityKey)" />
+            @if (Key.Protection == PgpProtection.SecurityKey)
+            {
+                <p style="margin:1rem 0 .5rem;">This key is protected by your security key.</p>
+                <button type="button" class="btn accent block" @onclick="UnlockWithSecurityKey" disabled="@busy">
+                    @if (busy) { <span class="spinner"></span> <span>Touch your security key…</span> }
+                    else { <Icon Name="shield" Size="16" /> <span>Use security key</span> }
+                </button>
+            }
+            else
+            {
+                <div class="field" style="margin-top:1rem;">
+                    <label for="unlock-pass">Key passphrase</label>
+                    @* Unbound on purpose: the browser reads it, so the passphrase never reaches the server. *@
+                    <input id="unlock-pass" @ref="passInput" type="password" autocomplete="off" />
+                </div>
+            }
+            <p class="fine-print"><Icon Name="lock" Size="13" /><span>The key is decrypted only in this browser tab and locks again after 30 idle minutes.</span></p>
+            @if (error != null)
+            {
+                <div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@error</div></div>
+            }
+        </div>
+        @if (Key.Protection == PgpProtection.Passphrase)
+        {
+            <div class="modal-foot">
+                <span class="spacer"></span>
+                <button type="button" class="btn" @onclick="Cancel">Cancel</button>
+                <button type="submit" class="btn accent" disabled="@busy">@if (busy) { <span class="spinner"></span> } Unlock</button>
+            </div>
+        }
+    </form>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public PgpKeyRecord Key { get; set; } = null!;
+    [Parameter] public string? Reason { get; set; }
+    [Parameter] public EventCallback OnUnlocked { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    private string? error;
+    private bool busy;
+    private ElementReference passInput;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && Key.Protection == PgpProtection.Passphrase) try { await passInput.FocusAsync(); } catch { }
+    }
+
+    private async Task UnlockWithPassphrase()
+    {
+        if (Key.Protection != PgpProtection.Passphrase) return;
+        await Run(() => Pgp.UnlockAsync(Key, passInput));
+    }
+
+    private Task UnlockWithSecurityKey() =>
+        Run(() => Pgp.UnlockWithSecurityKeyAsync(Key.Fingerprint, Key.SecretKey, Key.CredentialId ?? "", Key.PrfSalt ?? ""));
+
+    private async Task Run(Func<Task<PgpKeyInfo>> unlock)
+    {
+        busy = true;
+        error = null;
+        try
+        {
+            await unlock();
+            await OnUnlocked.InvokeAsync();
+        }
+        catch (PgpException ex) { error = ex.Message; }
+        finally { busy = false; }
+    }
+
+    private Task Cancel() => OnCancel.InvokeAsync();
+}

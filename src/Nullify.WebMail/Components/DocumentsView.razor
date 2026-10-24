@@ -1,0 +1,474 @@
+@using Nullify.WebMail.Services
+@inject WebDavService Dav
+@inject AppState State
+@inject IJSRuntime JS
+@implements IDisposable
+
+<div class="docs-shell" @ondragenter="DragEnter">
+    <div class="docs-head">
+        <nav class="crumbs" aria-label="Folder path">
+            <button class="crumb" @onclick='() => Open("/")' title="Documents"><Icon Name="hard-drive" Size="16" /> <span>Documents</span></button>
+            @foreach (var (name, path) in Crumbs())
+            {
+                var p = path;
+                <Icon Name="chevron-right" Size="14" Class="crumb-sep" />
+                <button class="crumb" @onclick="() => Open(p)">@name</button>
+            }
+        </nav>
+        @if (loading) { <span class="spinner" style="color:var(--muted);" aria-label="Loading"></span> }
+        <span class="spacer"></span>
+        @if (status == Status.Ready)
+        {
+            <button class="icon-btn" @onclick="Refresh" title="Refresh" disabled="@loading"><Icon Name="refresh" Size="17" /></button>
+            <button class="btn small" @onclick="StartNewFolder"><Icon Name="folder-plus" Size="15" /> New folder</button>
+            <label class="btn small accent file-picker" title="Upload files">
+                <Icon Name="upload" Size="15" /> Upload
+                <InputFile OnChange="Upload" multiple disabled="@uploading" />
+            </label>
+        }
+    </div>
+
+    @if (listing?.QuotaAvailable is { } free && listing.QuotaUsed is { } used)
+    {
+        var total = used + free;
+        <div class="quota" title="@MailFormat.Size(used) of @MailFormat.Size(total) used">
+            <div class="quota-bar"><span style="width:@(total == 0 ? 0 : Math.Min(100, used * 100 / total))%"></span></div>
+            <span>@MailFormat.Size(used) of @MailFormat.Size(total) used</span>
+        </div>
+    }
+
+    @if (uploading)
+    {
+        <div class="upload-status" role="status">
+            <span class="spinner"></span>
+            <span class="upload-name">Uploading @uploadName@(uploadCount > 1 ? $" ({uploadIndex} of {uploadCount})" : "")</span>
+            <div class="quota-bar"><span style="width:@uploadPercent%"></span></div>
+            <button class="btn ghost small" @onclick="CancelUpload">Cancel</button>
+        </div>
+    }
+
+    @switch (status)
+    {
+        case Status.NotConfigured:
+            <div class="empty-state">
+                <div class="empty-icon"><Icon Name="hard-drive" Size="26" /></div>
+                <h3>No storage connected</h3>
+                <p>Add a WebDAV server in Settings to browse your files here.</p>
+                <button class="btn" @onclick="OpenSettings">Open settings</button>
+            </div>
+            break;
+        case Status.NeedsReentry:
+            <div class="docs-pad"><div class="alert warn" role="alert"><Icon Name="lock" Size="15" /><div>@error <button class="link-btn" @onclick="OpenSettings">Open settings</button></div></div></div>
+            break;
+        case Status.Error:
+            <div class="docs-pad">
+                <div class="alert err" role="alert"><Icon Name="alert" Size="15" />
+                    <div>@error @if (path != "/") { <button class="link-btn" @onclick='() => Open("/")'>Go to the top folder</button> } else { <button class="link-btn" @onclick="OpenSettings">Check settings</button> }</div>
+                </div>
+            </div>
+            break;
+    }
+
+    @if (status == Status.Ready && listing != null)
+    {
+        <div class="docs-table-wrap">
+            <table class="docs-table">
+                <thead>
+                    <tr>
+                        <th class="col-name"><button @onclick='() => SortBy("name")'>Name @SortMark("name")</button></th>
+                        <th class="col-mod"><button @onclick='() => SortBy("modified")'>Modified @SortMark("modified")</button></th>
+                        <th class="col-size"><button @onclick='() => SortBy("size")'>Size @SortMark("size")</button></th>
+                        <th class="col-act"><span class="sr-only">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (newFolder)
+                    {
+                        <tr class="editing">
+                            <td colspan="4">
+                                <div class="rename-row">
+                                    <Icon Name="folder" Size="18" />
+                                    <input @ref="nameInput" @bind="nameValue" @bind:event="oninput" @onkeydown="NewFolderKey" placeholder="Folder name" aria-label="New folder name" />
+                                    <button class="btn small accent" @onclick="CreateFolder">Create</button>
+                                    <button class="btn small ghost" @onclick="() => newFolder = false">Cancel</button>
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                    @foreach (var item in Sorted())
+                    {
+                        var it = item;
+                        @if (renaming == it.Path)
+                        {
+                            <tr class="editing">
+                                <td colspan="4">
+                                    <div class="rename-row">
+                                        <Icon Name="@IconFor(it)" Size="18" />
+                                        <input @ref="nameInput" @bind="nameValue" @bind:event="oninput" @onkeydown="e => RenameKey(e, it)" aria-label="New name" />
+                                        <button class="btn small accent" @onclick="() => Rename(it)">Rename</button>
+                                        <button class="btn small ghost" @onclick="() => renaming = null">Cancel</button>
+                                    </div>
+                                </td>
+                            </tr>
+                            continue;
+                        }
+                        <tr>
+                            <td class="col-name">
+                                @if (it.IsFolder)
+                                {
+                                    <button class="doc-name" @onclick="() => Open(it.Path)">
+                                        <Icon Name="folder" Size="18" Class="ic-folder" /><span>@it.Name</span>
+                                    </button>
+                                }
+                                else
+                                {
+                                    <a class="doc-name" href="@DownloadUrl(it)" download="@it.Name" title="Download @it.Name">
+                                        <Icon Name="@IconFor(it)" Size="18" /><span>@it.Name</span>
+                                    </a>
+                                }
+                            </td>
+                            <td class="col-mod" title="@it.Modified?.ToString("u")">@Modified(it)</td>
+                            <td class="col-size">@(it.Size is { } s ? MailFormat.Size(s) : "")</td>
+                            <td class="col-act">
+                                <span class="row-actions">
+                                    @if (!it.IsFolder)
+                                    {
+                                        <a class="icon-btn small" href="@DownloadUrl(it)" download="@it.Name" title="Download"><Icon Name="download" Size="15" /></a>
+                                    }
+                                    <button class="icon-btn small" @onclick="() => StartRename(it)" title="Rename"><Icon Name="pen" Size="15" /></button>
+                                    <button class="icon-btn small" @onclick="() => Delete(it)" title="Delete"><Icon Name="trash" Size="15" /></button>
+                                </span>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+            @if (listing.Items.Count == 0 && !newFolder)
+            {
+                <div class="empty-state">
+                    <div class="empty-icon"><Icon Name="folder" Size="26" /></div>
+                    <h3>This folder is empty</h3>
+                    <p>Upload files or drag them here.</p>
+                </div>
+            }
+        </div>
+    }
+
+    @if (dragging && status == Status.Ready)
+    {
+        <div class="drop-overlay" @ondragleave="() => dragging = false" @ondrop="() => dragging = false">
+            <div class="drop-hint"><Icon Name="upload" Size="28" /><span>Drop files to upload to @(path == "/" ? "Documents" : Crumbs().Last().Name)</span></div>
+            <InputFile OnChange="Upload" multiple />
+        </div>
+    }
+</div>
+
+@code {
+    private enum Status { Loading, Ready, NotConfigured, NeedsReentry, Error }
+
+    private const long MaxUploadBytes = 2L * 1024 * 1024 * 1024;
+
+    private string path = "/";
+    private DavListing? listing;
+    private Status status = Status.Loading;
+    private string? error;
+    private bool loading;
+    private int loadToken;
+
+    private string sort = "name";
+    private bool descending;
+
+    private bool newFolder;
+    private string? renaming;
+    private string nameValue = "";
+    private ElementReference nameInput;
+    private bool focusName;
+
+    private bool dragging;
+    private bool uploading;
+    private string uploadName = "";
+    private int uploadIndex, uploadCount, uploadPercent;
+    private CancellationTokenSource? uploadCts;
+
+    protected override Task OnInitializedAsync() => Open("/");
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!focusName) return;
+        focusName = false;
+        try { await nameInput.FocusAsync(); } catch { /* row not rendered */ }
+    }
+
+    private async Task Open(string target)
+    {
+        var token = ++loadToken;
+        loading = true;
+        newFolder = false;
+        renaming = null;
+        try
+        {
+            var result = await Dav.ListAsync(target);
+            if (token != loadToken) return;
+            listing = result;
+            path = result.Path.EndsWith('/') ? result.Path : result.Path + "/";
+            status = Status.Ready;
+        }
+        catch (InvalidOperationException ex)
+        {
+            if (token != loadToken) return;
+            status = Status.NeedsReentry;
+            error = ex.Message;
+        }
+        catch (CalDavException ex) when (ex.Message.StartsWith("No Documents server"))
+        {
+            status = Status.NotConfigured;
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException)
+        {
+            if (token != loadToken) return;
+            status = Status.Error;
+            error = ex is TaskCanceledException ? "The server did not respond in time." : ex.Message;
+        }
+        finally
+        {
+            if (token == loadToken) loading = false;
+        }
+    }
+
+    private Task Refresh() => Open(path);
+
+    private IEnumerable<(string Name, string Path)> Crumbs()
+    {
+        var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i < parts.Length; i++)
+            yield return (parts[i], "/" + string.Join('/', parts[..(i + 1)]) + "/");
+    }
+
+    private IEnumerable<DavItem> Sorted()
+    {
+        var items = listing?.Items ?? [];
+        IOrderedEnumerable<DavItem> ordered = items.OrderBy(i => i.IsFolder ? 0 : 1); // folders first, always
+        ordered = sort switch
+        {
+            "modified" => descending ? ordered.ThenByDescending(i => i.Modified) : ordered.ThenBy(i => i.Modified),
+            "size" => descending ? ordered.ThenByDescending(i => i.Size ?? 0) : ordered.ThenBy(i => i.Size ?? 0),
+            _ => descending ? ordered.ThenByDescending(i => i.Name, StringComparer.CurrentCultureIgnoreCase)
+                            : ordered.ThenBy(i => i.Name, StringComparer.CurrentCultureIgnoreCase),
+        };
+        return ordered;
+    }
+
+    private void SortBy(string column)
+    {
+        if (sort == column) descending = !descending;
+        else (sort, descending) = (column, column != "name"); // newest/largest first feels natural
+    }
+
+    private MarkupString SortMark(string column) =>
+        (MarkupString)(sort == column ? $"<span class=\"sort-mark\">{(descending ? "↓" : "↑")}</span>" : "");
+
+    private string Modified(DavItem item)
+    {
+        if (item.Modified is not { } m) return "";
+        return MailFormat.ListDate(m.ToString("R"), State.TimeZone);
+    }
+
+    private static string IconFor(DavItem item)
+    {
+        if (item.IsFolder) return "folder";
+        var ext = Path.GetExtension(item.Name).ToLowerInvariant();
+        return ext switch
+        {
+            ".png" or ".jpg" or ".jpeg" or ".gif" or ".webp" or ".svg" or ".heic" => "image",
+            ".txt" or ".md" or ".pdf" or ".doc" or ".docx" or ".odt" or ".rtf" => "file-text",
+            _ => "file",
+        };
+    }
+
+    private static string DownloadUrl(DavItem item) => $"api/files/download?path={Uri.EscapeDataString(item.Path)}";
+
+    // ---- folders, rename, delete ----
+
+    private void StartNewFolder()
+    {
+        renaming = null;
+        newFolder = true;
+        nameValue = "";
+        focusName = true;
+    }
+
+    private async Task NewFolderKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await CreateFolder();
+        else if (e.Key == "Escape") newFolder = false;
+    }
+
+    private async Task CreateFolder()
+    {
+        try
+        {
+            await Dav.CreateFolderAsync(path, nameValue);
+            State.ShowToast($"Created \"{nameValue.Trim()}\"");
+            await Open(path);
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException or InvalidOperationException)
+        {
+            State.ShowToast(ex.Message, isError: true);
+        }
+    }
+
+    private void StartRename(DavItem item)
+    {
+        newFolder = false;
+        renaming = item.Path;
+        nameValue = item.Name;
+        focusName = true;
+    }
+
+    private async Task RenameKey(KeyboardEventArgs e, DavItem item)
+    {
+        if (e.Key == "Enter") await Rename(item);
+        else if (e.Key == "Escape") renaming = null;
+    }
+
+    private async Task Rename(DavItem item)
+    {
+        if (nameValue.Trim() == item.Name) { renaming = null; return; }
+        try
+        {
+            await Dav.RenameAsync(item, nameValue);
+            State.ShowToast($"Renamed to \"{nameValue.Trim()}\"");
+            await Open(path);
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException or InvalidOperationException)
+        {
+            State.ShowToast(ex.Message, isError: true);
+        }
+    }
+
+    private async Task Delete(DavItem item)
+    {
+        var what = item.IsFolder ? $"the folder \"{item.Name}\" and everything in it" : $"\"{item.Name}\"";
+        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Delete {what}? This can't be undone.")) return;
+        try
+        {
+            await Dav.DeleteAsync(item);
+            State.ShowToast($"Deleted \"{item.Name}\"");
+            await Open(path);
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException or InvalidOperationException)
+        {
+            State.ShowToast(ex.Message, isError: true);
+        }
+    }
+
+    // ---- uploads ----
+
+    private void DragEnter(DragEventArgs e)
+    {
+        if (status == Status.Ready && !uploading && e.DataTransfer.Types.Contains("Files")) dragging = true;
+    }
+
+    private async Task Upload(InputFileChangeEventArgs e)
+    {
+        dragging = false;
+        var files = e.GetMultipleFiles(100);
+        if (files.Count == 0 || uploading) return;
+
+        var existing = (listing?.Items ?? []).Where(i => !i.IsFolder).Select(i => i.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var clashes = files.Where(f => existing.Contains(f.Name)).Select(f => f.Name).ToList();
+        var overwrite = false;
+        if (clashes.Count > 0)
+        {
+            var list = string.Join(", ", clashes.Take(3)) + (clashes.Count > 3 ? $" and {clashes.Count - 3} more" : "");
+            overwrite = await JS.InvokeAsync<bool>("nullifyApp.confirm", $"{list} already exist{(clashes.Count == 1 ? "s" : "")} here. Replace?");
+        }
+
+        uploading = true;
+        uploadCount = files.Count;
+        uploadCts = new CancellationTokenSource();
+        var done = 0;
+        try
+        {
+            for (var i = 0; i < files.Count; i++)
+            {
+                var f = files[i];
+                if (!overwrite && existing.Contains(f.Name)) continue;
+                if (f.Size > MaxUploadBytes)
+                {
+                    State.ShowToast($"\"{f.Name}\" is larger than {MailFormat.Size(MaxUploadBytes)}.", isError: true);
+                    continue;
+                }
+                uploadIndex = i + 1;
+                uploadName = f.Name;
+                uploadPercent = 0;
+                StateHasChanged();
+                try
+                {
+                    await using var source = f.OpenReadStream(MaxUploadBytes, uploadCts.Token);
+                    await using var progress = new ProgressStream(source, f.Size, pct =>
+                    {
+                        if (pct == uploadPercent) return;
+                        uploadPercent = pct;
+                        _ = InvokeAsync(StateHasChanged);
+                    });
+                    await Dav.UploadAsync(path, f.Name, progress, f.Size, f.ContentType, overwrite, uploadCts.Token);
+                    done++;
+                }
+                catch (OperationCanceledException) when (uploadCts.IsCancellationRequested)
+                {
+                    State.ShowToast("Upload cancelled");
+                    break;
+                }
+                catch (Exception ex) when (ex is CalDavException or HttpRequestException or IOException or InvalidOperationException
+                                                  or WebDavService.FileExistsException)
+                {
+                    State.ShowToast(ex.Message, isError: true);
+                }
+            }
+        }
+        finally
+        {
+            uploading = false;
+            uploadCts.Dispose();
+            uploadCts = null;
+        }
+        if (done > 0) State.ShowToast(done == 1 ? $"Uploaded \"{uploadName}\"" : $"Uploaded {done} files");
+        await Open(path);
+    }
+
+    private void CancelUpload() => uploadCts?.Cancel();
+
+    private void OpenSettings()
+    {
+        State.ActiveTab = "settings";
+        State.NotifyStateChanged();
+    }
+
+    public void Dispose() => uploadCts?.Cancel();
+
+    /// <summary>Read-through stream that reports whole-percent progress.</summary>
+    private sealed class ProgressStream(Stream inner, long length, Action<int> report) : Stream
+    {
+        private long read;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => length;
+        public override long Position { get => read; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => Track(inner.Read(buffer, offset, count));
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default) =>
+            Track(await inner.ReadAsync(buffer, ct));
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        private int Track(int n)
+        {
+            read += n;
+            if (length > 0) report((int)Math.Min(100, read * 100 / length));
+            return n;
+        }
+    }
+}
