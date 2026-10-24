@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace Nullify.WebMail.Data;
 
@@ -15,6 +16,19 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<Domain> Domains => Set<Domain>();
     public DbSet<AdminSetting> AdminSettings => Set<AdminSetting>();
     public DbSet<TrustedDevice> TrustedDevices => Set<TrustedDevice>();
+
+    protected override void ConfigureConventions(ModelConfigurationBuilder conventions)
+    {
+        // Npgsql maps DateTime to timestamptz, which refuses values whose Kind isn't Utc.
+        // Every timestamp here is UTC by name, so store them as such and read them back
+        // with Kind=Utc. SQLite keeps its existing text mapping untouched.
+        if (Database.ProviderName == "Npgsql.EntityFrameworkCore.PostgreSQL")
+            conventions.Properties<DateTime>().HaveConversion<UtcDateTimeConverter>();
+    }
+
+    private sealed class UtcDateTimeConverter() : ValueConverter<DateTime, DateTime>(
+        v => v.Kind == DateTimeKind.Local ? v.ToUniversalTime() : DateTime.SpecifyKind(v, DateTimeKind.Utc),
+        v => DateTime.SpecifyKind(v, DateTimeKind.Utc));
 
     protected override void OnModelCreating(ModelBuilder model)
     {

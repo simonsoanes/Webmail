@@ -24,12 +24,29 @@ if (string.IsNullOrWhiteSpace(dataDir))
 dataDir = Path.GetFullPath(dataDir);
 Directory.CreateDirectory(dataDir);
 var dbPath = Path.Combine(dataDir, "nullify-webmail.db");
-var connectionString = $"Data Source={dbPath};Pooling=True;Default Timeout=30";
+
+// SQLite in the data directory unless Database:Provider says PostgreSql. The data
+// directory is still used for the key ring either way.
+var dbProvider = config["Database:Provider"];
+var usePostgres = dbProvider?.Trim().ToLowerInvariant() switch
+{
+    null or "" or "sqlite" => false,
+    "postgresql" or "postgres" or "npgsql" => true,
+    _ => throw new InvalidOperationException($"Unknown Database:Provider '{dbProvider}'. Use Sqlite or PostgreSql."),
+};
+var connectionString = usePostgres
+    ? config["Database:ConnectionString"] is { Length: > 0 } cs ? cs
+        : throw new InvalidOperationException("Database:ConnectionString is required when Database:Provider is PostgreSql.")
+    : $"Data Source={dbPath};Pooling=True;Default Timeout=30";
 
 // AddDbContextFactory alone: it registers the factory (singleton), the options
 // (singleton) AND AppDbContext itself (scoped). Mixing in AddDbContext registers a
 // second, scoped IDbContextOptionsConfiguration that poisons root-provider resolution.
-builder.Services.AddDbContextFactory<AppDbContext>(o => o.UseSqlite(connectionString));
+builder.Services.AddDbContextFactory<AppDbContext>(o =>
+{
+    if (usePostgres) o.UseNpgsql(connectionString);
+    else o.UseSqlite(connectionString);
+});
 builder.Services.AddDataProtection()
     .SetApplicationName("Nullify.WebMail")
     .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(dataDir, "keys")));
@@ -145,23 +162,32 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.EnsureCreated();
-    // EnsureCreated only builds a new database; tables added since then are created here.
-    db.Database.ExecuteSqlRaw("""
-        CREATE TABLE IF NOT EXISTS "TrustedDevices" (
-            "Id" INTEGER NOT NULL CONSTRAINT "PK_TrustedDevices" PRIMARY KEY AUTOINCREMENT,
-            "UserId" INTEGER NOT NULL,
-            "DeviceId" TEXT NOT NULL,
-            "Name" TEXT NOT NULL,
-            "CreatedUtc" TEXT NOT NULL,
-            "LastUsedUtc" TEXT NOT NULL,
-            "ExpiresUtc" TEXT NOT NULL,
-            CONSTRAINT "FK_TrustedDevices_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE);
-        CREATE UNIQUE INDEX IF NOT EXISTS "IX_TrustedDevices_DeviceId" ON "TrustedDevices" ("DeviceId");
-        CREATE INDEX IF NOT EXISTS "IX_TrustedDevices_UserId" ON "TrustedDevices" ("UserId");
-        """);
-    db.Database.ExecuteSqlRaw("PRAGMA journal_mode=WAL;");
+    if (usePostgres)
+    {
+        // PostgreSQL support arrived after TrustedDevices, so EnsureCreated already builds every table.
+        var pg = new Npgsql.NpgsqlConnectionStringBuilder(connectionString);
+        app.Logger.LogInformation("Using PostgreSQL database {Database} on {Host}", pg.Database, pg.Host);
+    }
+    else
+    {
+        // EnsureCreated only builds a new database; tables added since then are created here.
+        db.Database.ExecuteSqlRaw("""
+            CREATE TABLE IF NOT EXISTS "TrustedDevices" (
+                "Id" INTEGER NOT NULL CONSTRAINT "PK_TrustedDevices" PRIMARY KEY AUTOINCREMENT,
+                "UserId" INTEGER NOT NULL,
+                "DeviceId" TEXT NOT NULL,
+                "Name" TEXT NOT NULL,
+                "CreatedUtc" TEXT NOT NULL,
+                "LastUsedUtc" TEXT NOT NULL,
+                "ExpiresUtc" TEXT NOT NULL,
+                CONSTRAINT "FK_TrustedDevices_Users_UserId" FOREIGN KEY ("UserId") REFERENCES "Users" ("Id") ON DELETE CASCADE);
+            CREATE UNIQUE INDEX IF NOT EXISTS "IX_TrustedDevices_DeviceId" ON "TrustedDevices" ("DeviceId");
+            CREATE INDEX IF NOT EXISTS "IX_TrustedDevices_UserId" ON "TrustedDevices" ("UserId");
+            """);
+        db.Database.ExecuteSqlRaw("PRAGMA journal_mode=WAL;");
+        app.Logger.LogInformation("Using database {Path}", dbPath);
+    }
     app.Services.GetRequiredService<SettingsService>().Load();
-    app.Logger.LogInformation("Using database {Path}", dbPath);
 }
 
 // ------------------------------------------------------------------ Pipeline

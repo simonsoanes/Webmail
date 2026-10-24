@@ -1,6 +1,6 @@
 # Nullify.WebMail
 
-A self-hosted **webmail client** for your existing IMAP/SMTP server, with calendar, contacts, files, server-side filters and **OpenPGP**. It is built on .NET 10 (Blazor Server) and SQLite, and is designed to run in Docker on Linux behind a reverse proxy such as Caddy.
+A self-hosted **webmail client** for your existing IMAP/SMTP server, with calendar, contacts, files, server-side filters and **OpenPGP**. It is built on .NET 10 (Blazor Server) and SQLite (or PostgreSQL), and is designed to run in Docker on Linux behind a reverse proxy such as Caddy.
 
 - **Mail** over IMAP and SMTP: folders, search, flags, move and archive, attachments, HTML and plain-text compose, reply and forward
 - **Safe message display**: HTML mail is rendered in a sandboxed iframe, with remote images blocked until you allow them
@@ -68,6 +68,8 @@ All settings can be provided as environment variables (`Section__Key`) or in `ap
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `Storage__DataDirectory` | `/data` in Docker | Location of the SQLite database and key ring |
+| `Database__Provider` | `Sqlite` | `Sqlite`, or `PostgreSql` to store data in PostgreSQL (the key ring stays in the data directory) |
+| `Database__ConnectionString` | | PostgreSQL connection string, e.g. `Host=db;Database=webmail;Username=webmail;Password=...`; required with `PostgreSql` |
 | `PublicUrl` | *(empty)* | Public base URL of the site |
 | `Imap__Host`, `Imap__Port`, `Imap__Security` | `993`, `Tls` | Default IMAP server (`Tls`, `StartTls` or `None`) |
 | `Imap__AllowInvalidCertificates` | `false` | Accept self-signed IMAP certificates |
@@ -108,7 +110,7 @@ src/Nullify.WebMail
 ├── Components/   Blazor UI: mail, compose, calendar, contacts, files, settings, admin
 ├── Controllers/  JSON endpoints for sign-in, setup and browser-side requests
 ├── Services/     IMAP, SMTP, ManageSieve, CalDAV/CardDAV and WebDAV clients, MIME, iCalendar, vCard, OpenPGP glue
-├── Data/         EF Core entities and DbContext (SQLite)
+├── Data/         EF Core entities and DbContext (SQLite or PostgreSQL)
 └── wwwroot/js/pgp  OpenPGP implementation that runs in the browser
 ```
 
