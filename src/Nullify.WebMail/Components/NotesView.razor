@@ -189,10 +189,10 @@
 
     // editor
     private string title = "", body = "", collectionId = "";
-    private (string, string, string) initial;
+    private (string, string, string) initial = ("", "", "");
 
     private bool DetailOpen => selected != null || creating;
-    private bool Dirty => (title, body, collectionId) != initial;
+    private bool Dirty => DetailOpen && (title, body, collectionId) != initial;
 
     protected override Task OnInitializedAsync() => Load(refresh: false);
 

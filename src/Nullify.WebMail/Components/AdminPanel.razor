@@ -196,6 +196,10 @@
     private bool saving;
     private string? status;
 
+    private const int DefaultImapPort = 993;
+    private const int DefaultSmtpPort = 587;
+    private const int DefaultSievePort = 4190;
+
     // Edit form fields
     private string editName = "";
     private string editImapHost = "";
@@ -249,10 +253,10 @@
         editingExisting = false;
         editName = "";
         editTitle = "";
-        editImapHost = ""; editImapPort = 0; editImapSecurity = "";
+        editImapHost = ""; editImapPort = DefaultImapPort; editImapSecurity = "";
         editImapAllowInvalid = false;
-        editSmtpHost = ""; editSmtpPort = 0; editSmtpSecurity = "";
-        editSieveHost = ""; editSievePort = 0;
+        editSmtpHost = ""; editSmtpPort = DefaultSmtpPort; editSmtpSecurity = "";
+        editSieveHost = ""; editSievePort = DefaultSievePort;
         editCalDavUrl = ""; editCardDavUrl = "";
         editWebDavUrl = ""; editWebDavEnabled = false;
         showEditForm = true;
@@ -266,10 +270,10 @@
         editingExisting = true;
         editName = d.Name;
         editTitle = domainTitles.GetValueOrDefault(d.Name) ?? "";
-        editImapHost = d.ImapHost ?? ""; editImapPort = d.ImapPort ?? 0; editImapSecurity = d.ImapSecurity?.ToString() ?? "";
+        editImapHost = d.ImapHost ?? ""; editImapPort = d.ImapPort ?? DefaultImapPort; editImapSecurity = d.ImapSecurity?.ToString() ?? "";
         editImapAllowInvalid = d.ImapAllowInvalidCertificates;
-        editSmtpHost = d.SmtpHost ?? ""; editSmtpPort = d.SmtpPort ?? 0; editSmtpSecurity = d.SmtpSecurity?.ToString() ?? "";
-        editSieveHost = d.SieveHost ?? ""; editSievePort = d.SievePort ?? 0;
+        editSmtpHost = d.SmtpHost ?? ""; editSmtpPort = d.SmtpPort ?? DefaultSmtpPort; editSmtpSecurity = d.SmtpSecurity?.ToString() ?? "";
+        editSieveHost = d.SieveHost ?? ""; editSievePort = d.SievePort ?? DefaultSievePort;
         editCalDavUrl = d.CalDavUrl ?? ""; editCardDavUrl = d.CardDavUrl ?? "";
         showEditForm = true;
     }
