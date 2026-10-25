@@ -205,3 +205,52 @@ public class TrustedDevice
     public DateTime LastUsedUtc { get; set; } = DateTime.UtcNow;
     public DateTime ExpiresUtc { get; set; }
 }
+
+/// <summary>
+/// A passkey that signs in to this account. Besides the usual WebAuthn state it keeps the mail
+/// login, encrypted with a key derived from the passkey's PRF output, so the server can't read
+/// it again until the passkey is used (see <see cref="Services.PasskeyService"/>).
+/// </summary>
+public class Passkey
+{
+    public int Id { get; set; }
+
+    public int UserId { get; set; }
+    public User? User { get; set; }
+
+    /// <summary>"Edge on Windows" style description of the browser it was added from.</summary>
+    [MaxLength(128)]
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>The WebAuthn credential id, base64url.</summary>
+    [MaxLength(1400)]
+    public string CredentialId { get; set; } = string.Empty;
+
+    /// <summary>The credential's public key as a COSE_Key.</summary>
+    public byte[] PublicKey { get; set; } = [];
+
+    public long SignCount { get; set; }
+
+    /// <summary>Comma-separated WebAuthn transports, as a hint for the browser.</summary>
+    [MaxLength(256)]
+    public string? Transports { get; set; }
+
+    /// <summary>The WebAuthn user handle (base64url). One per user, shared by their passkeys.</summary>
+    [MaxLength(128)]
+    public string UserHandle { get; set; } = string.Empty;
+
+    /// <summary>The server salt the current wrap was made with; it changes every time the passkey is used.</summary>
+    public byte[] PrfSalt { get; set; } = [];
+
+    /// <summary>nonce | tag | AES-256-GCM(PRF key, Data Protection(login)).</summary>
+    public byte[] WrappedCredential { get; set; } = [];
+
+    /// <summary>Goes up each time the login is wrapped again, and is bound into the encryption.</summary>
+    public int WrapVersion { get; set; }
+
+    /// <summary>The wrapped password no longer signs in (it was changed): the passkey needs updating.</summary>
+    public bool Stale { get; set; }
+
+    public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
+    public DateTime? LastUsedUtc { get; set; }
+}

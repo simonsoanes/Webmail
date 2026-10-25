@@ -12,6 +12,7 @@ A self-hosted **webmail client** for your existing IMAP/SMTP server, with calend
 - **Multi-domain**: each email domain can be routed to its own IMAP, SMTP and Sieve servers; administrators can restrict sign-in to configured domains
 - **No password database**: users sign in with their mail credentials, which are checked against the IMAP server and then held only in server memory for the session. The browser's cookie carries just a random session key.
 - **Sign in from your phone**: on a computer you don't fully trust, scan a QR code and type the password on your phone instead. The computer gets a short-lived session that the phone can end ([design](docs/qr-passkey-signin.md)).
+- **Passkeys**: sign in with a fingerprint, face, PIN or security key instead of the password. The passkey also unlocks the mail password, which is stored encrypted with a key derived from the passkey (WebAuthn PRF), so the server can't read it between sign-ins ([design](docs/qr-passkey-signin.md)).
 - **I trust this computer**: on your own computer, tick it at sign-in to stay signed in for 30 days, even after the server restarts. The browser keeps the password in a cookie only the server can decrypt; sign out, or remove the computer in Settings, to end it.
 - **OpenPGP passphrases never reach the server**, and secret keys are only ever decrypted in the browser.
 - Light and dark themes, keyboard shortcuts, mobile-friendly layout

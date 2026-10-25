@@ -132,10 +132,12 @@ public sealed class AuthService(
     public const string QrSessionClaim = "nullify_qr";
     /// <summary>Present on sessions from a trusted computer: the <see cref="TrustedDevice"/> it signed in with.</summary>
     public const string TrustedDeviceClaim = "nullify_device";
+    /// <summary>Present on sessions signed in with a passkey: the <see cref="Passkey"/> row id.</summary>
+    public const string PasskeyClaim = "nullify_passkey";
 
-    public async Task SignInAsync(HttpContext ctx, CredentialInfo cred, string? trustedDeviceId = null)
+    public async Task SignInAsync(HttpContext ctx, CredentialInfo cred, string? trustedDeviceId = null, string? passkeyId = null)
     {
-        var (principal, properties) = BuildSignIn(cred, qrLifetime: null, trustedDeviceId);
+        var (principal, properties) = BuildSignIn(cred, qrLifetime: null, trustedDeviceId, passkeyId);
         await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, principal, properties);
         ctx.User = principal; // so the rest of this request (e.g. a page prerender) sees the user
     }
@@ -145,7 +147,7 @@ public sealed class AuthService(
     /// cookie with a fixed lifetime that is never extended, instead of the usual sliding 7 days.
     /// </summary>
     public (System.Security.Claims.ClaimsPrincipal, AuthenticationProperties) BuildSignIn(
-        CredentialInfo cred, TimeSpan? qrLifetime, string? trustedDeviceId = null)
+        CredentialInfo cred, TimeSpan? qrLifetime, string? trustedDeviceId = null, string? passkeyId = null)
     {
         var identity = new System.Security.Claims.ClaimsIdentity(CookieAuthenticationDefaults.AuthenticationScheme);
         identity.AddClaim(new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Name, cred.Login));
@@ -154,6 +156,8 @@ public sealed class AuthService(
         identity.AddClaim(new System.Security.Claims.Claim(SessionIdClaim, Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16))));
         if (trustedDeviceId != null && qrLifetime == null)
             identity.AddClaim(new System.Security.Claims.Claim(TrustedDeviceClaim, trustedDeviceId));
+        if (passkeyId != null)
+            identity.AddClaim(new System.Security.Claims.Claim(PasskeyClaim, passkeyId));
 
         if (qrLifetime is { } lifetime)
         {

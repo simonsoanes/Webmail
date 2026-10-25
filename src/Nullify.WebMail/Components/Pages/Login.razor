@@ -60,7 +60,11 @@
         </form>
 
         <div class="login-divider"><span>or</span></div>
-        <button type="button" class="btn block" @onclick="() => { byPhone = true; error = null; }">
+        <button type="button" class="btn block" disabled="@(loading || passkeyBusy)" @onclick="PasskeySignIn">
+            @if (passkeyBusy) { <span class="spinner"></span> <span>Waiting for your passkey…</span> }
+            else { <Icon Name="key" Size="16" /> <span>Sign in with a passkey</span> }
+        </button>
+        <button type="button" class="btn block login-alt-gap" @onclick="() => { byPhone = true; error = null; }">
             <Icon Name="smartphone" Size="16" /> <span>Sign in with your phone</span>
         </button>
         <p class="help login-alt-help">For a computer you don't fully trust: your password is typed on your phone instead.</p>
@@ -95,6 +99,7 @@
     private bool showPassword;
     private bool byPhone;
     private bool trustDevice;
+    private bool passkeyBusy;
     private string brand = BrandingService.DefaultTitle;
 
     protected override async Task OnInitializedAsync()
@@ -161,6 +166,32 @@
         finally
         {
             loading = false;
+        }
+    }
+
+    private async Task PasskeySignIn()
+    {
+        error = null;
+        passkeyBusy = true;
+        try
+        {
+            // The passkey ceremony and the key it derives stay in the browser and go to the server by fetch.
+            await using var module = await JS.InvokeAsync<IJSObjectReference>("import", "./js/passkey.js");
+            var result = await module.InvokeAsync<PasskeyOutcome>("signIn", username.Trim());
+            if (result.Ok)
+            {
+                Nav.NavigateTo("/", forceLoad: true);
+                return;
+            }
+            error = result.Error;
+        }
+        catch (Exception ex)
+        {
+            error = $"Connection error: {ex.Message}";
+        }
+        finally
+        {
+            passkeyBusy = false;
         }
     }
 

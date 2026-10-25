@@ -1,7 +1,8 @@
 # Phone-assisted sign-in (QR) and passkey-wrapped IMAP credentials
 
 Status: Part 1 (QR sign-in, with the password typed on the phone) is implemented. Part 2
-(passkeys) is still a proposal.
+(passkeys) is implemented for signing in on the same device; using a passkey on the phone page
+of the QR flow, and the "approve from a signed-in phone" step-up, are not built yet.
 
 ## As built (Part 1)
 
@@ -29,6 +30,42 @@ Status: Part 1 (QR sign-in, with the password typed on the phone) is implemented
   - approximate location on the phone (only IPs are shown)
   - the "approve from a phone that's already signed in" variant
   - a server-side list of QR sessions in Settings
+
+## As built (Part 2, same-device passkeys)
+
+- **Adding one:** Settings → Account → **Passkeys** → *Add a passkey*, while signed in with the
+  password (so it's in memory to wrap). Not offered on a desktop a phone signed in by QR, because
+  that browser would hold the key. The passkey is discoverable (`residentKey: 'required'`),
+  user verification is required, `attestation: 'none'`, and ES256 or RS256 keys are accepted.
+  If the authenticator doesn't return the PRF output at creation, the browser asks it once more
+  with `get`. Without PRF the passkey isn't saved.
+- **Signing in:** *Sign in with a passkey* on the sign-in page. PRF salts have to be given per
+  credential up front, so the server needs to know whose passkey it is: the user types the email
+  address, or the browser offers the credential ids it used before (`localStorage`,
+  `nullify.passkeys`; ids aren't secret). An address without passkeys gets a made-up credential
+  and salt that are stable per address, so the options don't reveal which addresses have them.
+- **Server:** `WebAuthn` (CBOR/COSE with `System.Formats.Cbor`, ECDsa/RSA) checks client data
+  (type, challenge, origin, not cross-origin), the RP id hash, the UP and UV flags, the
+  signature, the user handle and the signature counter. `PasskeyCeremonies` holds challenges in
+  memory for 3 minutes, single use. `PasskeyController` (`api/auth/passkey/*`) is rate-limited to
+  60 requests a minute per IP.
+- **Wrapping:** `Passkeys.WrappedCredential` = nonce | tag | AES-256-GCM(KEK, Data Protection
+  (`Nullify.WebMail.Passkey.v1`) of login + password), with AAD `UserId|CredentialId|WrapVersion`.
+  Each sign-in unwraps with the current salt's KEK and wraps again under a new salt's KEK.
+  `WrapVersion` is a concurrency token, so if two sign-ins race with one passkey, only one of them
+  wraps again.
+- **Browser:** `wwwroot/js/passkey.js` imports nothing and doesn't touch the PGP code. PRF
+  evaluates `SHA-256("nullify-webmail/imap-wrap/v1" ‖ salt)`. The KEK is
+  `HKDF-SHA256(prf, salt = empty, info = "imap-kek/v1" ‖ credentialId)`. Keys go to the server
+  by `fetch`, never through the Blazor circuit, and .NET only gets `{ ok, error }`.
+  `tests/pgp/passkey.test.mjs` checks the PRF inputs and that no PRF output is sent.
+- **Password changed:** IMAP rejects the unwrapped password, so the passkey is marked
+  *Needs updating*. After a password sign-in, *Update* in Settings wraps the new password under
+  that passkey (one more ceremony).
+- **Removing** a passkey also ends the sessions it signed in (`nullify_passkey` claim).
+  Passkey sessions are ordinary 7-day sessions, and passkey sign-ins don't trust the computer.
+- **Upgrades:** the `Passkeys` table is created on existing SQLite *and* PostgreSQL databases
+  at startup with `CREATE TABLE IF NOT EXISTS`.
 
 ## Goals
 

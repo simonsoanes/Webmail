@@ -1,0 +1,136 @@
+@* Copyright 2026 Simon Soanes
+   SPDX-License-Identifier: Apache-2.0 *@
+@implements IAsyncDisposable
+@inject PasskeyService Passkeys
+@inject UserSession Session
+@inject AppState State
+@inject IJSRuntime JS
+
+@* Passkeys that sign in to this account (see PasskeyService): add, update after a password change, remove. *@
+<div class="trusted-devices">
+    <h4>Passkeys</h4>
+    @if (passkeys == null)
+    {
+        <p class="muted"><span class="spinner"></span></p>
+    }
+    else
+    {
+        @if (passkeys.Count == 0)
+        {
+            <p class="muted">Sign in with a fingerprint, face, PIN or security key instead of your password. The passkey also unlocks your mail password, which this server keeps encrypted so that only the passkey can open it.</p>
+        }
+        else
+        {
+            <p class="muted">Each passkey keeps your mail password encrypted so that only that passkey can open it. Neither this server nor a copy of its database can read the password without it.</p>
+            <ul class="device-list">
+                @foreach (var p in passkeys)
+                {
+                    <li>
+                        <Icon Name="key" Size="16" />
+                        <div>
+                            <strong>@p.Name @if (p.Stale) { <span class="tag warn">Needs updating</span> }</strong>
+                            <span>
+                                Added @Local(p.CreatedUtc) · @(p.LastUsedUtc is { } used ? $"last used {Local(used)}" : "not used yet")
+                                @if (p.Stale) { <text> · your mail password has changed since it was saved</text> }
+                            </span>
+                        </div>
+                        @if (p.Stale && !Session.IsQrSession)
+                        {
+                            <button class="btn small" disabled="@busy" @onclick="() => Update(p)" title="Save your current password under this passkey">Update</button>
+                        }
+                        <button class="btn small danger" disabled="@busy" @onclick="() => Remove(p)">Remove</button>
+                    </li>
+                }
+            </ul>
+        }
+
+        @if (Session.IsQrSession)
+        {
+            <p class="muted">Passkeys can't be added on a computer your phone signed in, because its browser would hold the key that unlocks your password.</p>
+        }
+        else
+        {
+            <button class="btn small passkey-add" disabled="@busy" @onclick="Add">
+                @if (busy) { <span class="spinner"></span> <span>Waiting for your passkey…</span> }
+                else { <Icon Name="plus" Size="14" /> <span>Add a passkey</span> }
+            </button>
+        }
+    }
+</div>
+
+@code {
+    private List<PasskeyInfo>? passkeys;
+    private bool busy;
+    private IJSObjectReference? module;
+
+    protected override async Task OnInitializedAsync() => await Load();
+
+    private async Task Load()
+    {
+        if (Session.Credential == null) return;
+        passkeys = await Passkeys.ListAsync(Session.Credential.Login);
+    }
+
+    // The ceremonies run in the browser, which sends the PRF-derived key to the server by fetch, never through this circuit.
+    private async Task<PasskeyOutcome> RunInBrowser(string function, params object[] args)
+    {
+        module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/passkey.js");
+        return await module.InvokeAsync<PasskeyOutcome>(function, args);
+    }
+
+    private async Task Add() => await Ceremony(() => RunInBrowser("register"), "Passkey added. Next time, choose Sign in with a passkey.");
+
+    private async Task Update(PasskeyInfo p) => await Ceremony(() => RunInBrowser("update", p.Id), $"{p.Name} now unlocks your current password");
+
+    private async Task Ceremony(Func<Task<PasskeyOutcome>> run, string done)
+    {
+        busy = true;
+        try
+        {
+            var result = await run();
+            if (result.Ok) State.ShowToast(done);
+            else State.ShowToast(result.Error ?? "The passkey didn't work.", isError: true);
+            await Load();
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Passkey error: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task Remove(PasskeyInfo p)
+    {
+        busy = true;
+        try
+        {
+            // Sessions signed in with this passkey end too, this one included if it was.
+            await Passkeys.RemoveAsync(Session.Credential!.Login, p.Id);
+            State.ShowToast($"Passkey for {p.Name} removed. Delete it from your passkey manager too.");
+            await Load();
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Could not remove it: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private string Local(DateTime utc) =>
+        TimeZoneInfo.ConvertTime(new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)), State.TimeZone).ToString("d MMM yyyy");
+
+    public async ValueTask DisposeAsync()
+    {
+        if (module != null)
+        {
+            try { await module.DisposeAsync(); }
+            catch (JSDisconnectedException) { }
+        }
+    }
+}

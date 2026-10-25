@@ -16,6 +16,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<Domain> Domains => Set<Domain>();
     public DbSet<AdminSetting> AdminSettings => Set<AdminSetting>();
     public DbSet<TrustedDevice> TrustedDevices => Set<TrustedDevice>();
+    public DbSet<Passkey> Passkeys => Set<Passkey>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder conventions)
     {
@@ -72,6 +73,14 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         {
             d.HasIndex(x => x.DeviceId).IsUnique();
             d.HasIndex(x => x.UserId);
+        });
+
+        model.Entity<Passkey>(k =>
+        {
+            k.HasIndex(x => x.CredentialId).IsUnique();
+            k.HasIndex(x => x.UserId);
+            // Two sign-ins racing with one passkey: only the first may wrap the login again.
+            k.Property(x => x.WrapVersion).IsConcurrencyToken();
         });
     }
 }

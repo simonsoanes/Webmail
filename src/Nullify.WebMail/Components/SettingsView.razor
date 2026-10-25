@@ -294,6 +294,7 @@
             <div class="icon-tile"><Icon Name="user" /></div>
             <div><h3>Account</h3><p>Signed in as <strong>@State.Session?.Email</strong></p></div>
         </div>
+        <PasskeyList />
         <TrustedDeviceList />
         <button class="btn danger" @onclick="Logout"><Icon Name="logout" Size="15" /> Sign out</button>
     </section>

@@ -528,6 +528,7 @@ kbd {
 .login-divider { display: flex; align-items: center; gap: .75rem; margin: 1.1rem 0; color: var(--muted); font-size: .8rem; }
 .login-divider::before, .login-divider::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
 .login-alt { margin-top: .9rem; }
+.login-alt-gap { margin-top: .5rem; }
 .login-alt-help { font-size: .76rem; color: var(--muted); margin-top: .4rem; text-align: center; }
 .qr-signin { display: flex; flex-direction: column; align-items: stretch; }
 .qr-code { width: 224px; height: 224px; margin: 0 auto; border-radius: var(--radius-sm); overflow: hidden; background: #fff; }
@@ -563,6 +564,9 @@ kbd {
 .device-list li > div { display: flex; flex-direction: column; gap: .1rem; min-width: 0; flex: 1; }
 .device-list li span { color: var(--muted); font-size: .78rem; }
 .device-list .tag { margin-left: .35rem; }
+.device-list .tag.warn { color: var(--danger); }
+.device-list li .btn + .btn { margin-left: .35rem; }
+.passkey-add { margin-top: .6rem; }
 .page-footer { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: .4rem 1rem; color: var(--muted); font-size: .8rem; padding: 1rem; }
 .footer-link { display: inline-flex; align-items: center; gap: .35rem; color: var(--muted); }
 .footer-link:hover { color: var(--text); text-decoration: none; }
