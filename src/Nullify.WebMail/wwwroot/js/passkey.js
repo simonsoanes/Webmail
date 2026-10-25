@@ -4,7 +4,8 @@
 // Passkey sign-in: WebAuthn with the PRF extension, which lets a passkey derive a secret only it
 // can reproduce. This page turns that secret into a key that unlocks the mail login the server
 // keeps wrapped for the passkey (see PasskeyService), and sends the key straight to the server by
-// fetch, never through Blazor. What goes back to .NET is only { ok, error }.
+// fetch, never through Blazor. What goes back to .NET is only { ok, error } (plus, when a phone
+// signs in a computer, the revoke token and login the server returned).
 //
 // Kept apart from the PGP code on purpose: a security key's PRF output is a PGP passphrase, and
 // that must never reach the server. So nothing here imports the PGP module, the server's salts
@@ -82,8 +83,7 @@ const descriptor = (c) => ({ type: 'public-key', id: fromB64url(c.id), ...(c.tra
 
 async function outcome(run, cancelled) {
     try {
-        await run();
-        return { ok: true, error: null };
+        return { ok: true, error: null, ...(await run()) };
     } catch (e) {
         if (e?.name === 'NotAllowedError' || e?.name === 'AbortError') return { ok: false, error: cancelled };
         if (e?.name === 'InvalidStateError') return { ok: false, error: 'That passkey is already set up for your account.' };
@@ -134,6 +134,18 @@ export const signIn = (username) => outcome(async () => {
     const request = await assertWith(options);
     await post('/api/auth/passkey/signin', request);
     remember(request.credentialId);
+}, NOT_USED);
+
+/**
+ * On the phone page of the QR flow: approve the computer's sign-in with a passkey on this phone,
+ * instead of typing the password. The key that unlocks the password stays on the phone and the server.
+ */
+export const approveQr = (id, phoneToken, username) => outcome(async () => {
+    const options = await post('/api/auth/passkey/signin/options', { username: username || null, credentialIds: remembered() });
+    const assertion = await assertWith(options);
+    const result = await post(`/api/auth/qr/${encodeURIComponent(id)}/approve-passkey`, { phoneToken, assertion });
+    remember(assertion.credentialId);
+    return { revokeToken: result.revokeToken, login: result.login };
 }, NOT_USED);
 
 /** Add a passkey for the signed-in account, which keeps this session's mail login wrapped under it. */

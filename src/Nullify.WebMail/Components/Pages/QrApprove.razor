@@ -8,8 +8,9 @@
 
 <PageTitle>Sign in a computer · @brand WebMail</PageTitle>
 
-@* Phone half of signing in a computer by QR code (see QrLoginService). The password is typed here
-   and sent to the server; the computer only ever receives a session cookie. *@
+@* Phone half of signing in a computer by QR code (see QrLoginService). The password is typed here,
+   or a passkey on this phone unlocks the saved one (passkey.js), and either goes only to the server;
+   the computer only ever receives a session cookie. *@
 <div class="login-page">
     <div class="login-card">
         <div class="login-brand">
@@ -56,19 +57,25 @@
 
             case Step.Password:
                 <div class="alert warn"><Icon Name="monitor" Size="15" /><div>Signing in <strong>@describe!.Desktop</strong>. Your password stays on this phone and the server; the computer never receives it.</div></div>
+                <div class="field">
+                    <label for="username">Email address</label>
+                    <input id="username" type="text" @bind="username" @bind:event="oninput"
+                           placeholder="you@example.com" autocomplete="username" autocapitalize="off" />
+                </div>
+                <button type="button" class="btn accent block" disabled="@busy" @onclick="ApproveWithPasskey">
+                    @if (passkeyBusy) { <span class="spinner"></span> <span>Waiting for your passkey…</span> }
+                    else { <Icon Name="key" Size="16" /> <span>Use a passkey on this phone</span> }
+                </button>
+                <p class="help login-alt-help">If this phone has signed in with its passkey before, the email address can stay blank.</p>
+                <div class="login-divider"><span>or use your password</span></div>
                 <form @onsubmit="Approve" @onsubmit:preventDefault="true">
-                    <div class="field">
-                        <label for="username">Email address</label>
-                        <input id="username" type="text" @bind="username" @bind:event="oninput"
-                               placeholder="you@example.com" autocomplete="username" autocapitalize="off" />
-                    </div>
                     <div class="field">
                         <label for="password">Password</label>
                         <input id="password" type="password" @bind="password" @bind:event="oninput"
                                placeholder="Your mail password" autocomplete="current-password" />
                     </div>
-                    <button type="submit" class="btn accent block" disabled="@busy">
-                        @if (busy) { <span class="spinner"></span> <span>Signing in…</span> }
+                    <button type="submit" class="btn block" disabled="@busy">
+                        @if (busy && !passkeyBusy) { <span class="spinner"></span> <span>Signing in…</span> }
                         else { <span>Sign in the computer</span> }
                     </button>
                 </form>
@@ -114,6 +121,7 @@
     private string? approvedLogin;
     private string? error;
     private bool busy;
+    private bool passkeyBusy;
     private List<QrSessionResponse> sessions = [];
     private string brand = BrandingService.DefaultTitle;
 
@@ -183,19 +191,50 @@
         busy = false;
         password = "";
         if (result is { Success: true, RevokeToken: { } revoke })
-        {
-            approvedLogin = result.Login;
-            step = Step.Done;
-            try { await JS.InvokeVoidAsync("nullifyAuth.qrTokens.add", revoke); } catch { }
-            // Give the computer a moment to collect its session before showing it as active.
-            await Task.Delay(1500);
-            await LoadSessions();
-        }
+            await Approved(result.Login, revoke);
         else
+            Failed(result?.Error);
+    }
+
+    private async Task ApproveWithPasskey()
+    {
+        error = null;
+        busy = passkeyBusy = true;
+        try
         {
-            error = result?.Error ?? "Sign-in failed.";
-            if (error.StartsWith("Too many") || error.StartsWith("This sign-in request")) step = Step.NoRequest;
+            // The ceremony and the key it derives stay in the browser and go to the server by fetch.
+            await using var module = await JS.InvokeAsync<IJSObjectReference>("import", "./js/passkey.js");
+            var result = await module.InvokeAsync<QrPasskeyOutcome>("approveQr", id, phoneToken, username.Trim());
+            busy = passkeyBusy = false;
+            if (result is { Ok: true, RevokeToken: { } revoke })
+                await Approved(result.Login, revoke);
+            else
+                Failed(result.Error);
         }
+        catch (Exception ex)
+        {
+            error = $"Connection error: {ex.Message}";
+        }
+        finally
+        {
+            busy = passkeyBusy = false;
+        }
+    }
+
+    private async Task Approved(string? login, string revoke)
+    {
+        approvedLogin = login;
+        step = Step.Done;
+        try { await JS.InvokeVoidAsync("nullifyAuth.qrTokens.add", revoke); } catch { }
+        // Give the computer a moment to collect its session before showing it as active.
+        await Task.Delay(1500);
+        await LoadSessions();
+    }
+
+    private void Failed(string? message)
+    {
+        error = message ?? "Sign-in failed.";
+        if (error.StartsWith("Too many") || error.StartsWith("This sign-in request")) step = Step.NoRequest;
     }
 
     private async Task Revoke(string token)

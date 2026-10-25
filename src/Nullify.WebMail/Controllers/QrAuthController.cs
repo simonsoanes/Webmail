@@ -20,7 +20,7 @@ namespace Nullify.WebMail.Controllers;
 [Route("api/auth/qr")]
 [AllowAnonymous]
 [EnableRateLimiting(RateLimitPolicy)]
-public class QrAuthController(QrLoginService qr, AuthService auth, SettingsService settings) : ControllerBase
+public class QrAuthController(QrLoginService qr, AuthService auth, PasskeyService passkeys, SettingsService settings) : ControllerBase
 {
     public const string RateLimitPolicy = "qr";
     public const string StartRateLimitPolicy = "qr-start";
@@ -99,6 +99,40 @@ public class QrAuthController(QrLoginService qr, AuthService auth, SettingsServi
             : new QrApproveResponse(true, null, revokeToken, cred.Login, properties.ExpiresUtc);
     }
 
+    /// <summary>
+    /// Approve with a passkey on the phone instead of the password. The phone runs the ceremony
+    /// (options from <see cref="PasskeyController"/>), so the key that unlocks the password only
+    /// exists on the phone and the server; the computer still receives just a session cookie.
+    /// </summary>
+    [HttpPost("{id}/approve-passkey")]
+    public async Task<QrApproveResponse> ApprovePasskey(string id, [FromBody] QrPasskeyApproveRequest request)
+    {
+        if (!qr.CanApprove(id, request.PhoneToken) || request.Assertion == null)
+            return new QrApproveResponse(false, ExpiredMessage, null, null, null);
+
+        CredentialInfo cred;
+        string passkeyId;
+        try
+        {
+            (cred, passkeyId) = await passkeys.VerifySignInAsync(HttpContext, request.Assertion, HttpContext.RequestAborted);
+        }
+        catch (WebAuthnException ex)
+        {
+            // Counts like a wrong password, so a request can't be tried for ever.
+            var retry = qr.RecordFailedPassword(id);
+            return new QrApproveResponse(false,
+                retry ? ex.Message : "Too many failed attempts. Scan a new code on the computer to try again.",
+                null, null, null);
+        }
+
+        // Removing the passkey in Settings ends this computer's session too.
+        var (principal, properties) = auth.BuildSignIn(cred, qr.SessionLifetime, passkeyId: passkeyId);
+        var revokeToken = qr.Approve(id, request.PhoneToken!, principal, properties);
+        return revokeToken == null
+            ? new QrApproveResponse(false, ExpiredMessage, null, null, null)
+            : new QrApproveResponse(true, null, revokeToken, cred.Login, properties.ExpiresUtc);
+    }
+
     [HttpPost("sessions")]
     public IEnumerable<QrSessionResponse> Sessions([FromBody] QrSessionsRequest request) =>
         qr.Status(request.Tokens ?? []).Select(s => new QrSessionResponse(
@@ -117,6 +151,7 @@ public sealed record QrStartResponse(string Id, int Code, DateTimeOffset Expires
 public sealed record QrConfirmRequest(int Code);
 public sealed record QrConfirmResponse(bool Success, string? PhoneToken, string? Error);
 public sealed record QrApproveRequest(string? PhoneToken, string? Username, string? Password);
+public sealed record QrPasskeyApproveRequest(string? PhoneToken, PasskeyAssertionRequest? Assertion);
 public sealed record QrApproveResponse(bool Success, string? Error, string? RevokeToken, string? Login, DateTimeOffset? ExpiresUtc);
 public sealed record QrSessionsRequest(string[]? Tokens);
 public sealed record QrRevokeRequest(string? Token);

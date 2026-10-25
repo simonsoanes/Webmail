@@ -89,6 +89,21 @@ test('register evaluates only the labelled salt and sends only a derived key', a
   assert.ok(!seen.bodies[1].includes(b64url(seen.prfOutputs[0])));
 });
 
+test('approveQr sends the assertion with the phone token and returns only the revoke token and login', async () => {
+  const s1 = randomBytes(32), s2 = randomBytes(32);
+  const seen = fakeBrowser({
+    '/api/auth/passkey/signin/options': (id) => ({ handle: 'h', challenge: b64url(randomBytes(32)), rpId: 'localhost',
+      allow: [{ id: b64url(id), transports: null }], salts: { [b64url(id)]: { first: b64url(s1), second: b64url(s2) } } }),
+    '/api/auth/qr/abc/approve-passkey': () => ({ success: true, revokeToken: 'rt', login: 'a@x.test', expiresUtc: 'x' })
+  });
+  assert.deepEqual(await passkey.approveQr('abc', 'pt', ''), { ok: true, error: null, revokeToken: 'rt', login: 'a@x.test' });
+  assert.deepEqual(seen.prfInputs, [label(s1), label(s2)]);
+  const sent = JSON.parse(seen.bodies[1]);
+  assert.equal(sent.phoneToken, 'pt');
+  assert.equal(Buffer.from(sent.assertion.kek, 'base64url').length, 32);
+  for (const out of seen.prfOutputs) assert.ok(!seen.bodies[1].includes(b64url(out)), 'PRF output left the page');
+});
+
 test('a server error comes back as a message, not an exception', async () => {
   globalThis.fetch = async () => ({ ok: false, status: 400, json: async () => ({ success: false, error: 'Nope.' }) });
   assert.deepEqual(await passkey.signIn(''), { ok: false, error: 'Nope.' });

@@ -10,6 +10,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Nullify.WebMail.Controllers;
 using Nullify.WebMail.Data;
 using Nullify.WebMail.Services;
 
@@ -171,6 +172,53 @@ public class PasskeyTests
     }
 
     [TestMethod]
+    public async Task PhonePasskey_SignsInADesktop_ByQr()
+    {
+        using var authenticator = await Registered();
+        var (desktop, phone, id, phoneToken) = await ConfirmedQrRequest();
+
+        var approve = await Post<QrApproveResponse>(phone, $"/api/auth/qr/{id}/approve-passkey",
+            new { phoneToken, assertion = authenticator.Assert(await SignInOptions(phone, User)) });
+        Assert.IsTrue(approve.Success, approve.Error);
+        Assert.AreEqual(User, approve.Login);
+        Assert.IsNotNull(approve.RevokeToken);
+        Assert.AreEqual(System.Net.HttpStatusCode.Unauthorized, (await phone.GetAsync("/api/auth/session")).StatusCode, "The phone isn't signed in.");
+
+        Assert.IsTrue((await Post<Shared.LoginResponse>(desktop, $"/api/auth/qr/{id}/redeem")).Success);
+        Assert.AreEqual(System.Net.HttpStatusCode.OK, (await desktop.GetAsync("/api/auth/session")).StatusCode);
+
+        // The desktop's session came from the passkey, so removing the passkey ends it too.
+        using (var scope = _factory.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<PasskeyService>().RemoveAsync(User, (await RowFor(authenticator)).Id);
+        Assert.AreEqual(System.Net.HttpStatusCode.Unauthorized, (await desktop.GetAsync("/api/auth/session")).StatusCode);
+    }
+
+    [TestMethod]
+    public async Task FailedPasskeyApprovals_UseUpTheQrRequest()
+    {
+        using var authenticator = await Registered();
+        var (_, phone, id, phoneToken) = await ConfirmedQrRequest();
+
+        // Without the phone token nothing is checked or counted.
+        Assert.IsFalse((await Post<QrApproveResponse>(phone, $"/api/auth/qr/{id}/approve-passkey",
+            new { phoneToken = "wrong", assertion = authenticator.Assert(await SignInOptions(phone, User)) })).Success);
+
+        QrApproveResponse last = null!;
+        for (var i = 0; i < 3; i++)
+        {
+            var options = await SignInOptions(phone, User);
+            var forged = authenticator.Assert(options) with { Signature = authenticator.Assert(options, tamper: true).Signature };
+            last = await Post<QrApproveResponse>(phone, $"/api/auth/qr/{id}/approve-passkey", new { phoneToken, assertion = forged });
+            Assert.IsFalse(last.Success);
+        }
+        StringAssert.StartsWith(last.Error, "Too many");
+
+        var genuine = await Post<QrApproveResponse>(phone, $"/api/auth/qr/{id}/approve-passkey",
+            new { phoneToken, assertion = authenticator.Assert(await SignInOptions(phone, User)) });
+        Assert.IsFalse(genuine.Success, "The request was cancelled after three failures.");
+    }
+
+    [TestMethod]
     public void RsaSignatures_Verify()
     {
         using var rsa = RSA.Create(2048);
@@ -212,6 +260,18 @@ public class PasskeyTests
         var response = await Post<PasskeyResponse>(client, "/api/auth/passkey/register", authenticator.Create(options));
         Assert.IsTrue(response.Success, response.Error);
         return (authenticator, client);
+    }
+
+    /// <summary>A desktop starts a QR sign-in and the phone picks the right number.</summary>
+    private static async Task<(HttpClient Desktop, HttpClient Phone, string Id, string PhoneToken)> ConfirmedQrRequest()
+    {
+        var desktop = _factory.CreateClient();
+        var phone = _factory.CreateClient();
+        var start = await Post<QrStartResponse>(desktop, "/api/auth/qr/start");
+        await Post<QrDescription>(phone, $"/api/auth/qr/{start.Id}/describe");
+        var confirm = await Post<QrConfirmResponse>(phone, $"/api/auth/qr/{start.Id}/confirm", new { code = start.Code });
+        Assert.IsTrue(confirm.Success, confirm.Error);
+        return (desktop, phone, start.Id, confirm.PhoneToken!);
     }
 
     private static async Task SignInWithPassword(HttpClient client, string password)

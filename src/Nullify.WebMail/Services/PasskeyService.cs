@@ -42,6 +42,9 @@ public sealed record PasskeyResponse(bool Success, string? Error, string? Creden
 /// <summary>What passkey.js hands back to .NET: whether it worked, and nothing secret.</summary>
 public sealed record PasskeyOutcome(bool Ok, string? Error);
 
+/// <summary>passkey.js approving a QR sign-in: the phone's revoke token for the computer's session, and who signed in.</summary>
+public sealed record QrPasskeyOutcome(bool Ok, string? Error, string? RevokeToken, string? Login);
+
 /// <summary>WebAuthn ceremonies in progress: in memory only, single use, a few minutes long.</summary>
 public sealed class PasskeyCeremonies
 {
@@ -194,7 +197,7 @@ public sealed class PasskeyService(
         username = username?.Trim();
         var ids = (credentialIds ?? []).Where(id => id is { Length: > 0 and <= 1400 }).Distinct().Take(10).ToArray();
         if (string.IsNullOrEmpty(username) && ids.Length == 0)
-            throw new WebAuthnException("Type your email address, then choose Sign in with a passkey.");
+            throw new WebAuthnException("Type your email address first, then use your passkey.");
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var lower = username?.ToLowerInvariant();
@@ -219,17 +222,28 @@ public sealed class PasskeyService(
             salts[decoy] = new PasskeySalts(ceremonies.DecoySalt(username), Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(SaltSize)));
         }
         if (allow.Count == 0)
-            throw new WebAuthnException("Type your email address, then choose Sign in with a passkey.");
+            throw new WebAuthnException("Type your email address first, then use your passkey.");
 
         var handle = ceremonies.Add(pending);
         return new PasskeyAssertionOptions(handle, Base64Url.EncodeToString(pending.Challenge), RpId(ctx), allow.ToArray(), salts);
     }
 
-    /// <summary>Check the assertion, unwrap the login with the browser's key, check it with IMAP, wrap it again under the next salt, and sign in.</summary>
+    /// <summary>Sign this browser in with a passkey.</summary>
     public async Task FinishSignInAsync(HttpContext ctx, PasskeyAssertionRequest r, CancellationToken ct = default)
     {
+        var (cred, passkeyId) = await VerifySignInAsync(ctx, r, ct);
+        await auth.SignInAsync(ctx, cred, passkeyId: passkeyId);
+    }
+
+    /// <summary>
+    /// Check the assertion, unwrap the login with the browser's key, check it with IMAP and wrap it
+    /// again under the next salt. Returns the credential to sign in with and the passkey's id for the
+    /// session's claim, without signing anyone in: a phone can use its passkey to sign in a computer.
+    /// </summary>
+    public async Task<(CredentialInfo Credential, string PasskeyId)> VerifySignInAsync(HttpContext ctx, PasskeyAssertionRequest r, CancellationToken ct = default)
+    {
         var pending = ceremonies.Take(r.Handle, PasskeyCeremonies.Kind.SignIn)
-            ?? throw new WebAuthnException("This sign-in request has expired. Try again.");
+            ?? throw new WebAuthnException("The passkey request has expired. Try again.");
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var passkey = await VerifyAssertionAsync(db, ctx, pending, r, ct);
@@ -260,7 +274,7 @@ public sealed class PasskeyService(
         await SaveRewrapAsync(db, ct);
 
         await auth.UpsertUserAsync(login.Login, ct);
-        await auth.SignInAsync(ctx, AuthService.BuildCredential(login.Login, login.Password, servers), passkeyId: passkey.Id.ToString());
+        return (AuthService.BuildCredential(login.Login, login.Password, servers), passkey.Id.ToString());
     }
 
     // ------------------------------------------------------------------ updating the saved password (signed in)

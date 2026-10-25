@@ -1,8 +1,9 @@
 # Phone-assisted sign-in (QR) and passkey-wrapped IMAP credentials
 
 Status: Part 1 (QR sign-in, with the password typed on the phone) is implemented. Part 2
-(passkeys) is implemented for signing in on the same device; using a passkey on the phone page
-of the QR flow, and the "approve from a signed-in phone" step-up, are not built yet.
+(passkeys) is implemented, both for signing in on the same device and on the phone page of the QR
+flow. The "approve from a phone that's already signed in" variant, and its passkey step-up, are not
+built yet.
 
 ## As built (Part 1)
 
@@ -31,7 +32,7 @@ of the QR flow, and the "approve from a signed-in phone" step-up, are not built 
   - the "approve from a phone that's already signed in" variant
   - a server-side list of QR sessions in Settings
 
-## As built (Part 2, same-device passkeys)
+## As built (Part 2, passkeys)
 
 - **Adding one:** Settings → Account → **Passkeys** → *Add a passkey*, while signed in with the
   password (so it's in memory to wrap). Not offered on a desktop a phone signed in by QR, because
@@ -64,6 +65,14 @@ of the QR flow, and the "approve from a signed-in phone" step-up, are not built 
   that passkey (one more ceremony).
 - **Removing** a passkey also ends the sessions it signed in (`nullify_passkey` claim).
   Passkey sessions are ordinary 7-day sessions, and passkey sign-ins don't trust the computer.
+- **On the phone page of the QR flow:** after number matching, `/m/approve` offers *Use a
+  passkey on this phone* above the password. The phone gets options from
+  `api/auth/passkey/signin/options` and runs the ceremony, then posts the assertion and both KEKs
+  with its phone token to `api/auth/qr/{id}/approve-passkey`. The phone token is checked before
+  the assertion. A failed passkey approval counts like a wrong password (3 and the request is
+  cancelled). The desktop's QR session carries the `nullify_passkey` claim, so removing the
+  passkey ends it too. The KEK only ever exists on the phone and the server, which is the
+  recommended setup in [Where should the passkey live?](#where-should-the-passkey-live).
 - **Upgrades:** the `Passkeys` table is created on existing SQLite *and* PostgreSQL databases
   at startup with `CREATE TABLE IF NOT EXISTS`.
 
