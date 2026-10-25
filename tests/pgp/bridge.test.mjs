@@ -7,6 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import * as bridge from '../../src/Nullify.WebMail/wwwroot/js/pgp-bridge.js';
 import * as pgp from '../../src/Nullify.WebMail/wwwroot/js/pgp/index.js';
@@ -66,6 +67,16 @@ test('importKey: unprotected key must be protected before it leaves the browser'
   await assert.rejects(pgp.unlockKey((await pgp.readKeys(r.secretKey))[0], ''), 'stored copy needs the passphrase');
   await assert.rejects(bridge.importKey({ existing: [r.summary.fingerprint], protection: 'Keep' }, field(fresh.privateKey), field(PASS), null, null), /already have/);
   await assert.rejects(bridge.importKey({ existing: [], protection: 'Keep' }, field(fresh.publicKey), field(''), null, null), /public key/);
+});
+
+test('importKey: a legacy CAST5 key kept under its passphrase is stored with AES-256', async () => {
+  const armored = readFileSync(new URL('./fixtures/gnupg1-cast5-secret.asc', import.meta.url), 'utf8');
+  const legacyPass = 'correct horse battery staple', text = field(armored), cur = field(legacyPass);
+  const r = await bridge.importKey({ existing: [], protection: 'Keep' }, text, cur, null, null);
+  assert.ok(!leaks(r, legacyPass)); assert.equal(text.value + cur.value, '');
+  const [k] = await pgp.readKeys(r.secretKey);
+  for (const part of [k.primary, ...k.subkeys]) assert.equal(part.k.secretArea[1], 9);
+  await pgp.unlockKey(k, legacyPass);
 });
 
 // The bridge's 30-minute auto-lock timers would keep Node alive.

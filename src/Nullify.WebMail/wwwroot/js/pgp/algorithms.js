@@ -53,7 +53,7 @@ export function hashInfo(id) {
 
 export function symInfo(id) {
     const s = SYM[id];
-    if (!s) throw new PgpError(`Unsupported cipher ${id}: only AES is supported (legacy CAST5, 3DES, IDEA and Blowfish are not).`);
+    if (!s) throw new PgpError(`Unsupported cipher ${id}: only AES is supported (legacy CAST5, 3DES, IDEA and Blowfish are not; CAST5-protected secret keys can still be imported).`);
     return s;
 }
 

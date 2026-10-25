@@ -7,6 +7,7 @@
 import { concat, u16, u32, utf8, toHex, fromHex, equal, randomBytes, b64url, fromB64url, armor, ARMOR, toBinary, PgpError } from './util.js';
 import { toBig, toBytes, modInv } from './bigint.js';
 import { cfbEncrypt, cfbDecrypt } from './aes.js';
+import { cfbDecrypt as cast5CfbDecrypt } from './cast5.js';
 import {
     PK, PK_NAMES, HASH, CURVES, CURVE_OIDS, curveOf, symInfo, digest,
     rsaSign, rsaVerify, dsaVerify, ecdsaSign, ecdsaVerify, ed25519Sign, ed25519Verify, checkKeyPair,
@@ -350,6 +351,14 @@ function writeSecretFields(algo, sec) {
     return concat(...(SECRET_FIELDS[algo] ?? []).map((f) => writeMPI(sec[f])));
 }
 
+const CAST5 = 3;
+
+/** Cipher for opening a secret area: AES, or CAST5 for keys exported by GnuPG before 2.1. */
+function keyCipher(sym) {
+    if (sym === CAST5) return { keySize: 16, blockSize: 8, decrypt: cast5CfbDecrypt };
+    return { keySize: symInfo(sym).keySize, blockSize: 16, decrypt: cfbDecrypt };
+}
+
 const checksum16 = (bytes) => { let s = 0; for (const b of bytes) s = (s + b) & 0xffff; return u16(s); };
 
 /** Decrypt a key packet's secret area. */
@@ -368,10 +377,10 @@ export async function unlockPart(part, passphrase) {
     const sym = area[1];
     const [s2k, o] = readS2K(area, 2);
     if (s2k.type === 101) throw new PgpError(s2k.gnu === 'card' ? 'This key is stored on a smart card.' : 'This key has no secret part.');
-    const info = symInfo(sym);
-    const iv = area.subarray(o, o + 16);
-    const enc = area.subarray(o + 16);
-    const dec = cfbDecrypt(await s2kDerive(passphrase, s2k, info.keySize), iv, enc);
+    const cipher = keyCipher(sym);
+    const iv = area.subarray(o, o + cipher.blockSize);
+    const enc = area.subarray(o + cipher.blockSize);
+    const dec = cipher.decrypt(await s2kDerive(passphrase, s2k, cipher.keySize), iv, enc);
     if (usage === 254) {
         const body = dec.subarray(0, dec.length - 20);
         const sha = new Uint8Array(await subtle.digest('SHA-1', body));

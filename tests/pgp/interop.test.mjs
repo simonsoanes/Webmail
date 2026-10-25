@@ -8,13 +8,14 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as openpgp from 'openpgp';
 
 import * as pgp from '../../src/Nullify.WebMail/wwwroot/js/pgp/index.js';
 import { expandKey, encryptBlock, expandDecryptKey, decryptBlock, ocbEncrypt, ocbDecrypt, cfbDecrypt } from '../../src/Nullify.WebMail/wwwroot/js/pgp/aes.js';
+import * as cast5 from '../../src/Nullify.WebMail/wwwroot/js/pgp/cast5.js';
 import { readPackets, parseSignature, TAG } from '../../src/Nullify.WebMail/wwwroot/js/pgp/packets.js';
 import { signedData, keyParts } from '../../src/Nullify.WebMail/wwwroot/js/pgp/keys.js';
 import { digest, rsaSign, ed25519Sign } from '../../src/Nullify.WebMail/wwwroot/js/pgp/algorithms.js';
@@ -133,6 +134,21 @@ describe('primitives', () => {
         assert.deepEqual(ocbDecrypt(K, nonce, ocbEncrypt(K, nonce, long, ad), ad), long);
     });
 
+    test('CAST5 matches the RFC 2144 vector and maintenance test', () => {
+        const out = new Uint8Array(8);
+        cast5.encryptBlock(cast5.expandKey(fromHex('0123456712345678234567893456789a')), fromHex('0123456789abcdef'), 0, out, 0);
+        assert.equal(toHex(out), '238b4fe5847e44b2');
+        const a = fromHex('0123456712345678234567893456789a'), b = a.slice();
+        for (let i = 0; i < 1000000; i++) {
+            const kb = cast5.expandKey(b);
+            cast5.encryptBlock(kb, a, 0, a, 0); cast5.encryptBlock(kb, a, 8, a, 8);
+            const ka = cast5.expandKey(a);
+            cast5.encryptBlock(ka, b, 0, b, 0); cast5.encryptBlock(ka, b, 8, b, 8);
+        }
+        assert.equal(toHex(a), 'eea9d0a249fd3ba6b3436fb89d6dca92');
+        assert.equal(toHex(b), 'b2c95eb00c31ad7180ac05b8e83d696e');
+    });
+
     test('armor round-trips and CRC-24 matches the RFC check value', () => {
         assert.equal(crc24(enc.encode('123456789')), 0x21cf02);
         const data = crypto.getRandomValues(new Uint8Array(1000));
@@ -246,6 +262,39 @@ for (const [label, [primaryAlgo, subAlgo]] of Object.entries(GPG_KINDS)) {
         }
     });
 }
+
+describe('GnuPG 1.4 key protected with CAST5', () => {
+    // Modern GnuPG always exports with AES, so this fixture comes from gpg 1.4.23
+    // (`--s2k-cipher-algo CAST5 --gen-key`, passphrase PASS).
+    const armored = readFileSync(new URL('./fixtures/gnupg1-cast5-secret.asc', import.meta.url), 'utf8');
+    let fpr, sec;
+
+    before(async () => {
+        [sec] = await pgp.readKeys(armored);
+        fpr = pgp.summarise(sec).fingerprint;
+        gpg(['--import'], enc.encode(armored));
+    });
+
+    test('the fixture really is CAST5-protected, and OpenPGP.js opens it', async () => {
+        for (const part of [sec.primary, ...sec.subkeys]) assert.equal(part.k.secretArea[1], 3);
+        const theirs = await openpgp.decryptKey({ privateKey: await openpgp.readPrivateKey({ armoredKey: armored }), passphrase: PASS });
+        assert.ok(theirs.isDecrypted());
+    });
+
+    test('unlocks it, rejects a wrong passphrase, and decrypts what GnuPG encrypts to it', async () => {
+        const parts = await pgp.unlockKey(sec, PASS);
+        assert.equal(Object.keys(parts).length, 2);
+        await assert.rejects(() => pgp.unlockKey(sec, 'wrong'), /Wrong passphrase/);
+        const message = gpg(['--armor', '--encrypt', '--recipient', fpr], enc.encode(TEXT)).out.toString();
+        assert.equal(dec.decode((await pgp.decrypt({ message, decryptionKeys: [{ key: sec, parts }] })).data), TEXT);
+    });
+
+    test('re-protecting under the same passphrase moves it to AES-256', async () => {
+        const [again] = await pgp.readKeys(await pgp.reprotect(sec, PASS, PASS));
+        for (const part of [again.primary, ...again.subkeys]) assert.equal(part.k.secretArea[1], 9);
+        assert.equal(Object.keys(await pgp.unlockKey(again, PASS)).length, 2);
+    });
+});
 
 // ---------------------------------------------------------------- our keys in GnuPG
 

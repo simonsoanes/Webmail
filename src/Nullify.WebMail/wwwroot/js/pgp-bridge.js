@@ -136,11 +136,11 @@ export async function importKey({ existing, protection }, textEl, passEl, newPas
         if (protection === 'Keep' && !current) throw new Error('This key has no passphrase. Choose one, or protect it with a security key.');
         await unlock(info.fingerprint, text, current);
 
-        let secretKey = text, prot = { securityKey: false, credentialId: null, salt: null };
-        if (protection !== 'Keep') {
-            prot = await newProtection(protection, info.primaryUserId ?? info.fingerprint, newPassEl, confirmEl);
-            secretKey = await pgp.reprotect(key, current, prot.passphrase);
-        }
+        // Keeping the passphrase still re-protects with AES-256, so legacy CAST5 exports are
+        // only ever opened here and never stored that way.
+        let prot = { securityKey: false, credentialId: null, salt: null, passphrase: current };
+        if (protection !== 'Keep') prot = await newProtection(protection, info.primaryUserId ?? info.fingerprint, newPassEl, confirmEl);
+        const secretKey = await pgp.reprotect(key, current, prot.passphrase);
         clear(textEl, passEl, newPassEl, confirmEl);
         return { summary: info, publicKey: pgp.armorPublic(key), secretKey, ...shareable(prot) };
     } catch (e) { fail(e); }
