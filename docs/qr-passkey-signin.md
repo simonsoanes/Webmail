@@ -50,6 +50,15 @@ built yet.
   signature, the user handle and the signature counter. `PasskeyCeremonies` holds challenges in
   memory for 3 minutes, single use. `PasskeyController` (`api/auth/passkey/*`) is rate-limited to
   60 requests a minute per IP.
+- **Origin check:** the origin's host must be exactly the RP id (the request's host), so a
+  subdomain is refused. The scheme must be https (or http on loopback). The port must be the
+  default, the request's port, or `PublicUrl`'s. The scheme isn't taken from the request, because
+  a TLS proxy whose `X-Forwarded-Proto` isn't trusted makes the request look like plain http.
+  Browsers only allow WebAuthn in a secure context anyway. A refused origin is logged with what the
+  server expected.
+- **Passkey managers without PRF:** at the time of writing, the Bitwarden browser extension stores
+  passkeys but doesn't pass PRF to sites, so its passkeys can't be used here. The same goes for
+  other sites that need PRF. A security key or the platform's own passkey manager works.
 - **Wrapping:** `Passkeys.WrappedCredential` = nonce | tag | AES-256-GCM(KEK, Data Protection
   (`Nullify.WebMail.Passkey.v1`) of login + password), with AAD `UserId|CredentialId|WrapVersion`.
   Each sign-in unwraps with the current salt's KEK and wraps again under a new salt's KEK.

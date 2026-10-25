@@ -103,14 +103,30 @@ public class PasskeyTests
     }
 
     [TestMethod]
-    public async Task Assertion_FromAnotherSite_IsRefused()
+    [DataRow("https://evil.example")]
+    [DataRow("https://evil.localhost")] // a subdomain may claim the parent as RP id; its origin is still refused
+    [DataRow("https://localhost:8443")]
+    [DataRow("http://localhost.evil.example")]
+    public async Task Assertion_FromAnotherSite_IsRefused(string origin)
     {
         using var authenticator = await Registered();
         var options = await SignInOptions(_factory.CreateClient(), User);
         var response = await Post<PasskeyResponse>(_factory.CreateClient(), "/api/auth/passkey/signin",
-            authenticator.Assert(options, origin: "https://evil.example"));
+            authenticator.Assert(options, origin: origin));
         Assert.IsFalse(response.Success);
-        StringAssert.Contains(response.Error, "different site");
+        StringAssert.Contains(response.Error, "isn't this site's address");
+        StringAssert.Contains(response.Error, origin);
+    }
+
+    [TestMethod]
+    public async Task HttpsOrigin_IsAccepted_BehindAProxyThatHidesTheScheme()
+    {
+        // The test server sees plain http, as the app does behind a TLS proxy whose X-Forwarded-Proto isn't trusted.
+        using var authenticator = await Registered();
+        var options = await SignInOptions(_factory.CreateClient(), User);
+        var response = await Post<PasskeyResponse>(_factory.CreateClient(), "/api/auth/passkey/signin",
+            authenticator.Assert(options, origin: "https://localhost"));
+        Assert.IsTrue(response.Success, response.Error);
     }
 
     [TestMethod]

@@ -153,7 +153,7 @@ public sealed class PasskeyService(
             throw new WebAuthnException("This request has expired. Try again.");
 
         var clientData = Bytes(r.ClientDataJson);
-        WebAuthn.VerifyClientData(clientData, "webauthn.create", pending.Challenge, Origins(ctx));
+        WebAuthn.VerifyClientData(clientData, "webauthn.create", pending.Challenge, OriginCheck(ctx));
         var data = WebAuthn.ParseAuthenticatorData(WebAuthn.AuthenticatorDataFromAttestation(Bytes(r.AttestationObject)));
         WebAuthn.VerifyRpAndUser(data, RpId(ctx));
         if (data.CredentialId == null || data.CosePublicKey == null)
@@ -345,7 +345,7 @@ public sealed class PasskeyService(
             ?? throw new WebAuthnException("That passkey isn't set up any more.");
 
         var clientData = Bytes(r.ClientDataJson);
-        WebAuthn.VerifyClientData(clientData, "webauthn.get", pending.Challenge, Origins(ctx));
+        WebAuthn.VerifyClientData(clientData, "webauthn.get", pending.Challenge, OriginCheck(ctx));
         var authData = Bytes(r.AuthenticatorData);
         var data = WebAuthn.ParseAuthenticatorData(authData);
         WebAuthn.VerifyRpAndUser(data, RpId(ctx));
@@ -417,12 +417,31 @@ public sealed class PasskeyService(
 
     private static string RpId(HttpContext ctx) => ctx.Request.Host.Host;
 
-    private string[] Origins(HttpContext ctx)
+    /// <summary>
+    /// Whether the origin the browser reported is this site. That means its host is exactly the RP id,
+    /// so a subdomain that claims the parent as RP id is refused. Browsers only allow WebAuthn over
+    /// https (or on localhost), so the scheme isn't taken from the request here. Behind a TLS proxy
+    /// whose X-Forwarded-Proto isn't trusted, the request looks like plain http, and that would
+    /// refuse every passkey. The port has to be the default, the request's, or PublicUrl's.
+    /// </summary>
+    private Func<string, bool> OriginCheck(HttpContext ctx)
     {
-        var origins = new List<string> { $"{ctx.Request.Scheme}://{ctx.Request.Host}" };
-        if (settings.Current.PublicUrl is { } url && Uri.TryCreate(url, UriKind.Absolute, out var u))
-            origins.Add(u.GetLeftPart(UriPartial.Authority));
-        return origins.ToArray();
+        var rpId = RpId(ctx);
+        var publicUrl = settings.Current.PublicUrl is { } url && Uri.TryCreate(url, UriKind.Absolute, out var p) ? p : null;
+        return origin =>
+        {
+            if (!Uri.TryCreate(origin, UriKind.Absolute, out var o) || o.AbsolutePath != "/" || o.UserInfo.Length > 0)
+                return false;
+            if (publicUrl != null && o.GetLeftPart(UriPartial.Authority).Equals(publicUrl.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase))
+                return true;
+            var secure = o.Scheme == Uri.UriSchemeHttps || (o.Scheme == Uri.UriSchemeHttp && o.IsLoopback);
+            var port = o.IsDefaultPort || o.Port == ctx.Request.Host.Port;
+            var allowed = secure && port && o.IdnHost.Equals(rpId, StringComparison.OrdinalIgnoreCase);
+            if (!allowed)
+                logger.LogWarning("Passkey refused: the browser reported origin {Origin}, but this site is {Scheme}://{Host} (PublicUrl {PublicUrl})",
+                    origin, ctx.Request.Scheme, ctx.Request.Host, settings.Current.PublicUrl ?? "not set");
+            return allowed;
+        };
     }
 
     private static byte[] Bytes(string? base64Url)

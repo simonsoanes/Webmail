@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "webmail",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "src/Nullify.WebMail", "--launch-profile", "http"],
+      "port": 5000
+    }
+  ]
+}

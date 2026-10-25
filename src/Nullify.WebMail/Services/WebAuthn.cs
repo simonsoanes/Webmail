@@ -35,7 +35,7 @@ public static class WebAuthn
     public static readonly int[] Algorithms = [Es256, Rs256];
 
     /// <summary>Check clientDataJSON against the ceremony the server started.</summary>
-    public static void VerifyClientData(byte[] clientDataJson, string expectedType, byte[] expectedChallenge, IReadOnlyCollection<string> allowedOrigins)
+    public static void VerifyClientData(byte[] clientDataJson, string expectedType, byte[] expectedChallenge, Func<string, bool> originAllowed)
     {
         string? type, challenge, origin;
         bool crossOrigin;
@@ -57,8 +57,10 @@ public static class WebAuthn
             throw new WebAuthnException("The passkey answered a different request.");
         if (challenge == null || !CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(challenge), Encoding.ASCII.GetBytes(Base64Url.EncodeToString(expectedChallenge))))
             throw new WebAuthnException("The passkey answered a different sign-in request. Try again.");
-        if (origin == null || crossOrigin || !allowedOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase))
+        if (origin == null || crossOrigin)
             throw new WebAuthnException("The passkey was used from a different site.");
+        if (!originAllowed(origin))
+            throw new WebAuthnException($"The passkey was used from {origin}, which isn't this site's address.");
     }
 
     public static AuthenticatorData ParseAuthenticatorData(byte[] data)
