@@ -101,6 +101,64 @@ public class SenderAuthTests
     }
 
     [TestMethod]
+    public void LocalSubmission_SignedAndVerifiedByOurServer_GetsTheShield()
+    {
+        // Sent from this webmail (a container on a private range) through the server's submission port.
+        var local = """
+            Return-Path: <simon@nullify.net>
+            Delivered-To: simon@nullify.net
+            Received: from tau.nullify.net
+            	by tau2 with LMTP
+            	id lp12JdOs3WrNjgEAI7dfHA
+            	(envelope-from <simon@nullify.net>)
+            	for <simon@nullify.net>; Sun, 25 Oct 2026 07:16:35 +0000
+            Authentication-Results: tau.nullify.net;
+            	dkim=pass (1024-bit key; unprotected) header.d=nullify.net header.i=@nullify.net header.a=rsa-sha256 header.s=default header.b=Cxx91oz5;
+            	dkim-atps=neutral
+            Received: from tau.nullify.net (localhost [127.0.0.1])
+            	by tau.nullify.net (Postfix) with ESMTP id 0A1B14059C
+            	for <simon@nullify.net>; Sun, 25 Oct 2026 07:16:35 +0000 (UTC)
+            DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/simple; d=nullify.net;
+            	s=default; t=1792912594;
+            	h=From:To:Subject:Date:From;
+            	b=Cxx91oz5Tuay9S50pm9jf5GKR8apeIJGR7JGEdP+Urq/Hxi0NVm8wm9SJ3BSDTsfG
+            Received: from 6332822385ec (docker2.vm.nullify.net [198.18.1.93])
+            	by tau.nullify.net (Postfix) with ESMTPSA id D7AEF40518
+            	for <simon@nullify.net>; Sun, 25 Oct 2026 07:16:34 +0000 (UTC)
+            From: simon@nullify.net
+            To: simon@nullify.net
+            Subject: test
+
+            Body
+            """;
+        var info = SenderAuth.Analyse(Msg(local));
+        Assert.IsNotNull(info);
+        Assert.AreEqual(SenderAuthVerdict.Verified, info.Verdict);
+        Assert.AreEqual("nullify.net", info.FromDomain);
+    }
+
+    [TestMethod]
+    public void LocalSubmission_NotVerifiedForTheFromDomain_ShowsNothing()
+    {
+        var top = "Authentication-Results: tau.nullify.net; dkim=pass header.d=nullify.net";
+        var submission = "Received: from client (docker2.vm.nullify.net [198.18.1.93]) by tau.nullify.net (Postfix) with ESMTPSA id 1";
+        Assert.IsNull(SenderAuth.Analyse(Msg(top, submission, WithFrom("From: PayPal <service@paypal.com>"))));
+    }
+
+    [TestMethod]
+    public void PrivateHop_HidesForgedHeadersBelowIt()
+    {
+        // Mail relayed in from a LAN host: a fake "internet" hop and fake pass below it must not count.
+        var top = "Authentication-Results: tau.nullify.net; dkim=none";
+        var lan = "Received: from relay (relay.lan [192.168.1.20]) by tau.nullify.net (Postfix) with SMTP id 2";
+        var forged = """
+            Authentication-Results: tau.nullify.net; dkim=pass header.d=github.com
+            Received: from out-30.smtp.github.com ([192.30.252.129]) by tau.nullify.net (Postfix) with ESMTPS id 3
+            """;
+        Assert.IsNull(SenderAuth.Analyse(Msg(top, lan, forged, SenderPart)));
+    }
+
+    [TestMethod]
     public void ForgedPassBelowIngress_IsIgnored()
     {
         // The sender wrote results in our server's name, plus a fake Received with a public IP.
