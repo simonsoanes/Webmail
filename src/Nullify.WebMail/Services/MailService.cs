@@ -12,7 +12,7 @@ namespace Nullify.WebMail.Services;
 /// All methods take an explicit credential — no HttpContext dependency, so they work
 /// inside interactive circuits.
 /// </summary>
-public sealed class MailService(ConnectionPool pool, SmtpClient smtp, ILogger<MailService> logger)
+public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsService settings, ILogger<MailService> logger)
 {
     private static readonly string[] SpecialUses = ["Sent", "Drafts", "Trash", "Junk", "Archive"];
 
@@ -79,7 +79,9 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, ILogger<Ma
             var attachments = parsed.Attachments
                 .Select(a => new AttachmentInfo(a.PartId, a.Filename, a.ContentType, a.Data.LongLength, a.ContentId, a.IsInline))
                 .ToList();
-            return new MessageContent(Encoding.UTF8.GetString(raw), html, parsed.TextBody, parsed.Headers, attachments, DetectPgp(parsed));
+            var senderAuth = SenderAuth.Analyse(Encoding.Latin1.GetString(raw), settings.Current.ImapAuthServIds);
+            return new MessageContent(Encoding.UTF8.GetString(raw), html, parsed.TextBody, parsed.Headers, attachments,
+                DetectPgp(parsed), senderAuth);
         });
 
     /// <summary>OpenPGP content for the browser to decrypt/verify: PGP/MIME first, then inline blocks.</summary>

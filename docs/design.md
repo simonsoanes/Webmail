@@ -195,6 +195,23 @@ the browser's implicit `noopener`, and `<meta name="referrer"
 content="no-referrer">` plus `referrerpolicy="no-referrer"` keep the
 webmail URL out of the Referer header.
 
+### Sender verification (DKIM / SPF)
+
+`SenderAuth` reads the `Authentication-Results` and `Received-SPF` headers the
+user's own mail server wrote, and the preview shows a small shield beside the
+sender (verified) or a warning (not verified).  Senders can write those headers
+too, so only ones above the hop where the message arrived from the internet
+(the topmost `Received` with a public client IP) are trusted; anything below
+was supplied by the sender.  An `Authentication-Results` header must also name
+one of the server's own `Received` hops, or match `Imap:AuthServId` when set.
+
+"Verified" means a DKIM or SPF pass *for the From address's domain*: a pass
+for some other domain does not vouch for the sender shown.  More than one From
+header, a DMARC fail, or a "pass" in the server's name found below the ingress
+hop (a forgery attempt) always gives the warning.  Nothing is shown at all for
+local mail, authenticated submissions, or a server that records no results, so
+missing headers never look like a pass or a failure.
+
 ### OpenPGP
 
 - Keys are stored in the browser's **IndexedDB** (encrypted with a user
