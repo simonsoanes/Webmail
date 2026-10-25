@@ -16,15 +16,17 @@ namespace Nullify.WebMail.Services;
 ///
 /// Anyone can write those headers into a message they send, so position is what makes them
 /// trustworthy. Each server prepends its headers, so everything above the hop where the
-/// message arrived from the internet was written by the user's own servers, and everything
-/// below it came from the sender. That hop is the topmost Received header whose client is a
-/// public IP address; results are only read from above it. This relies on the server recording
-/// the connecting IP in Received, which every mainstream MTA does; if it can't be found there
-/// is no indicator at all, never a "verified" one.
+/// message entered the user's server was written by that server, and everything below it
+/// came from the sender. That hop is the topmost Received header with a client IP address
+/// other than loopback (hops between the server's own processes have none, or 127.0.0.1);
+/// results are only read from above it. This relies on the server recording the connecting
+/// IP in Received, which every mainstream MTA does; if it can't be found there is no
+/// indicator at all, never a "verified" one.
 ///
-/// Returns null (show nothing) for local mail, mail submitted by an authenticated user, and
-/// servers that record no results, so the absence of headers is never shown as a failure
-/// or a pass.
+/// Mail from the internet gets a verdict either way. Local mail (submitted by a signed-in
+/// user, or from a private network address) only ever gets the verified shield: nothing is
+/// shown when it isn't verified. Servers that record no results show nothing, so the
+/// absence of headers is never shown as a failure or a pass.
 /// </summary>
 public static partial class SenderAuth
 {
@@ -37,9 +39,10 @@ public static partial class SenderAuth
     {
         var headers = ReadHeaders(latin1Source);
 
-        var ingress = headers.FindIndex(h => IsName(h, "Received") && ParseReceived(h.Value).HasPublicClient);
+        var ingress = headers.FindIndex(h => IsName(h, "Received") && ParseReceived(h.Value).Client != null);
         if (ingress < 0) return null;
-        if (ParseReceived(headers[ingress].Value).Authenticated) return null; // the user's own outgoing mail
+        var entry = ParseReceived(headers[ingress].Value);
+        var local = entry.Authenticated || !IsPublic(entry.Client!);
 
         var serverHosts = headers.Take(ingress + 1)
             .Where(h => IsName(h, "Received"))
@@ -91,6 +94,7 @@ public static partial class SenderAuth
             }
         }
 
+        if (local && problems.Count > 0) return null;
         return new SenderAuthInfo(problems.Count == 0 ? SenderAuthVerdict.Verified : SenderAuthVerdict.NotVerified,
             fromDomain, checks, problems);
     }
@@ -156,9 +160,10 @@ public static partial class SenderAuth
         return list;
     }
 
-    internal sealed record ReceivedHop(string? By, bool HasPublicClient, bool Authenticated);
+    /// <param name="Client">The connecting client's IP (a public one if several), or null for an internal hop.</param>
+    internal sealed record ReceivedHop(string? By, IPAddress? Client, bool Authenticated);
 
-    /// <summary>Pull the "by" host, client IPs and protocol out of a Received header.</summary>
+    /// <summary>Pull the "by" host, client IP and protocol out of a Received header.</summary>
     internal static ReceivedHop ParseReceived(string value)
     {
         // Words outside comments, with their positions; stop at the date after ';'.
@@ -189,18 +194,21 @@ public static partial class SenderAuth
             return k >= 0 && k + 1 < words.Count ? words[k + 1].Word : null;
         }
 
-        var hasPublic = false;
+        IPAddress? client = null;
         if (words.Count > 0 && words[0].Word.Equals("from", StringComparison.OrdinalIgnoreCase))
         {
             // The from clause runs to the next clause keyword and includes its comments,
             // which is where MTAs record the connecting address: "from helo (rdns [1.2.3.4])".
             var end = words.Skip(1).FirstOrDefault(w => ClauseKeywords.Contains(w.Word.ToLowerInvariant())).Start;
             var clause = value[words[0].End..(end > 0 ? end : value.Length)];
-            hasPublic = clause.Split([' ', '\t', '(', ')', '[', ']', '=', ',', ';'], StringSplitOptions.RemoveEmptyEntries)
-                .Any(t => ParseIp(t) is { } ip && IsPublic(ip));
+            var ips = clause.Split([' ', '\t', '(', ')', '[', ']', '=', ',', ';'], StringSplitOptions.RemoveEmptyEntries)
+                .Select(ParseIp).OfType<IPAddress>()
+                .Where(ip => !IPAddress.IsLoopback(ip.IsIPv4MappedToIPv6 ? ip.MapToIPv4() : ip))
+                .ToList();
+            client = ips.FirstOrDefault(IsPublic) ?? ips.FirstOrDefault();
         }
         var with = Next("with");
-        return new ReceivedHop(Next("by") is { } by ? NormaliseDomain(by) : null, hasPublic,
+        return new ReceivedHop(Next("by") is { } by ? NormaliseDomain(by) : null, client,
             with != null && AuthenticatedProtocol().IsMatch(with));
     }
 
