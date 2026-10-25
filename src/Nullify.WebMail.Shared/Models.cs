@@ -25,7 +25,27 @@ public sealed record MessageContent(
     string Source, string? HtmlBody, string? TextBody,
     IReadOnlyDictionary<string, string>? Headers = null,
     IReadOnlyList<AttachmentInfo>? Attachments = null,
-    PgpMessageInfo? Pgp = null);
+    PgpMessageInfo? Pgp = null,
+    SenderAuthInfo? SenderAuth = null);
+
+public enum SenderAuthVerdict { Verified, NotVerified }
+
+/// <summary>
+/// What the user's own mail server recorded about the sender (DKIM/SPF/DMARC), read only from
+/// headers it added after accepting the message. Null on a message when there is nothing
+/// trustworthy to show (local mail, or a server that doesn't record results).
+/// </summary>
+/// <param name="FromDomain">Domain of the From address the checks were matched against, if one could be read.</param>
+/// <param name="Problems">Why the sender isn't verified, in plain words (empty when verified).</param>
+public sealed record SenderAuthInfo(
+    SenderAuthVerdict Verdict, string? FromDomain,
+    IReadOnlyList<SenderAuthCheck> Checks, IReadOnlyList<string> Problems);
+
+/// <param name="Method">"dkim", "spf" or "dmarc".</param>
+/// <param name="Result">The server's result keyword, lower case ("pass", "fail", "softfail", ...).</param>
+/// <param name="Domain">The domain the check was about (DKIM d=, SPF envelope sender, DMARC header.from).</param>
+/// <param name="Aligned">True when it passed for the From address's domain (so it vouches for the visible sender).</param>
+public sealed record SenderAuthCheck(string Method, string Result, string? Domain, bool Aligned);
 
 /// <summary>An attachment of a received message; <see cref="PartId"/> is the MIME part path (e.g. "2.1").</summary>
 public sealed record AttachmentInfo(string PartId, string Filename, string ContentType, long Size, string? ContentId, bool IsInline);

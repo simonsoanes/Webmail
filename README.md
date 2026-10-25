@@ -73,6 +73,7 @@ All settings can be provided as environment variables (`Section__Key`) or in `ap
 | `PublicUrl` | *(empty)* | Public base URL of the site |
 | `Imap__Host`, `Imap__Port`, `Imap__Security` | `993`, `Tls` | Default IMAP server (`Tls`, `StartTls` or `None`) |
 | `Imap__AllowInvalidCertificates` | `false` | Accept self-signed IMAP certificates |
+| `Imap__AuthServId` | | The name your mail server writes in `Authentication-Results` (comma-separated if several). Optional: when unset, results are trusted only if they name one of the server's own `Received` hops |
 | `Smtp__Host`, `Smtp__Port`, `Smtp__Security` | `587`, `StartTls` | Default SMTP server |
 | `Sieve__Host`, `Sieve__Port` | `4190` | Default ManageSieve server |
 | `CalDav__Url`, `CardDav__Url` | | Default CalDAV / CardDAV server |

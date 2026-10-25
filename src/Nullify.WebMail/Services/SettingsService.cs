@@ -13,6 +13,8 @@ public sealed record ServerSettings
     public int ImapPort { get; init; } = 993;
     public MailSecurity ImapSecurity { get; init; } = MailSecurity.Tls;
     public bool ImapAllowInvalidCertificates { get; init; }
+    /// <summary>The authserv-id(s) the mail server writes in Authentication-Results; empty to infer from its Received hops.</summary>
+    public IReadOnlyList<string> ImapAuthServIds { get; init; } = [];
     public string? SmtpHost { get; init; }
     public int SmtpPort { get; init; } = 587;
     public MailSecurity SmtpSecurity { get; init; } = MailSecurity.StartTls;
@@ -45,6 +47,8 @@ public sealed class SettingsService(IConfiguration configuration)
             ImapPort = int.TryParse(configuration["Imap:Port"], out var ip) ? ip : 993,
             ImapSecurity = Enum.TryParse<MailSecurity>(configuration["Imap:Security"], out var isec) ? isec : MailSecurity.Tls,
             ImapAllowInvalidCertificates = bool.TryParse(configuration["Imap:AllowInvalidCertificates"], out var iaic) && iaic,
+            ImapAuthServIds = (configuration["Imap:AuthServId"] ?? "")
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
             SmtpHost = configuration["Smtp:Host"],
             SmtpPort = int.TryParse(configuration["Smtp:Port"], out var sp) ? sp : 587,
             SmtpSecurity = Enum.TryParse<MailSecurity>(configuration["Smtp:Security"], out var ssec) ? ssec : MailSecurity.StartTls,

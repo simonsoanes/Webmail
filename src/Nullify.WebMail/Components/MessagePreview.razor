@@ -80,6 +80,15 @@
                     <div class="sender-name">
                         <strong>@(sender.Display.Length > 0 ? sender.Display : "(unknown sender)")</strong>
                         @if (sender.Name.Length > 0) { <span class="addr">&lt;@sender.Email&gt;</span> }
+                        @if (message.SenderAuth is { } auth)
+                        {
+                            var ok = auth.Verdict == SenderAuthVerdict.Verified;
+                            <button class="auth-mark @(ok ? "ok" : "bad")" @onclick="() => showDetails = !showDetails"
+                                    title="@(ok ? $"Your mail server verified this was sent by {auth.FromDomain}" : "Your mail server could not verify the sender")"
+                                    aria-label="@(ok ? $"Sender verified: {auth.FromDomain}" : "Sender not verified")">
+                                <Icon Name="@(ok ? "shield-check" : "shield-alert")" Size="14" />
+                            </button>
+                        }
                     </div>
                     <div class="recipients">
                         to @RecipientSummary(to, cc)
@@ -94,11 +103,37 @@
                             @if (Header("Reply-To").Length > 0) { <dt>Reply-To</dt><dd>@Header("Reply-To")</dd> }
                             <dt>Date</dt><dd>@MailFormat.FullDate(Header("Date"), State.TimeZone)</dd>
                             @if (Header("Message-ID").Length > 0) { <dt>Message-ID</dt><dd>@Header("Message-ID")</dd> }
+                            @if (message.SenderAuth is { } details)
+                            {
+                                <dt>Sender check</dt>
+                                <dd>
+                                    @(details.Verdict == SenderAuthVerdict.Verified ? $"Verified for {details.FromDomain} by your mail server" : "Not verified")
+                                    @foreach (var c in details.Checks)
+                                    {
+                                        <span class="auth-check">@c.Method.ToUpperInvariant() @c.Result@(c.Domain != null ? $" ({c.Domain})" : "")</span>
+                                    }
+                                </dd>
+                            }
                         </dl>
                     }
                 </div>
                 <div class="sender-date" title="@Header("Date")">@MailFormat.FullDate(Header("Date"), State.TimeZone)</div>
             </div>
+
+            @if (message.SenderAuth is { Verdict: SenderAuthVerdict.NotVerified } unverified)
+            {
+                <div class="auth-warning" role="alert">
+                    <Icon Name="shield-alert" Size="16" />
+                    <span class="lines">
+                        <strong>Sender not verified</strong>
+                        <span>
+                            Your mail server couldn't confirm this message really came from @(unverified.FromDomain ?? "the address shown").
+                            Be careful with links, attachments and any request for money, passwords or personal details.
+                        </span>
+                        @foreach (var problem in unverified.Problems) { <small>@problem</small> }
+                    </span>
+                </div>
+            }
 
             @if (showSource)
             {
