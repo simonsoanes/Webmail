@@ -254,3 +254,6 @@ window.nullifyApp = (() => {
         confirm(message) { return window.confirm(message); },
     };
 })();
+
+// Installable as an app. The worker only shows an offline page; it caches no mail.
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => { });

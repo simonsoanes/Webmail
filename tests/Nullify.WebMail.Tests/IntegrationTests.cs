@@ -43,6 +43,27 @@ public class BasicIntegrationTests
     }
 
     [TestMethod]
+    public async Task Manifest_Anonymous_IsInstallable()
+    {
+        var client = _factory.CreateClient();
+        var response = await client.GetAsync("/manifest.webmanifest");
+        Assert.AreEqual(System.Net.HttpStatusCode.OK, response.StatusCode);
+        Assert.AreEqual("application/manifest+json", response.Content.Headers.ContentType?.MediaType);
+        using var doc = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var root = doc.RootElement;
+        Assert.AreEqual("Nullify WebMail", root.GetProperty("name").GetString());
+        Assert.AreEqual("standalone", root.GetProperty("display").GetString());
+        Assert.AreEqual("./", root.GetProperty("start_url").GetString());
+        var sizes = root.GetProperty("icons").EnumerateArray().Select(i => i.GetProperty("sizes").GetString()).ToList();
+        CollectionAssert.IsSubsetOf(new[] { "192x192", "512x512" }, sizes);
+
+        foreach (var icon in root.GetProperty("icons").EnumerateArray())
+            Assert.AreEqual(System.Net.HttpStatusCode.OK, (await client.GetAsync("/" + icon.GetProperty("src").GetString())).StatusCode);
+        Assert.AreEqual(System.Net.HttpStatusCode.OK, (await client.GetAsync("/sw.js")).StatusCode);
+        Assert.AreEqual(System.Net.HttpStatusCode.OK, (await client.GetAsync("/offline.html")).StatusCode);
+    }
+
+    [TestMethod]
     public async Task HasUsers_OnFreshDatabase_ReturnsFalse()
     {
         var client = _factory.CreateClient();
