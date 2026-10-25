@@ -32,7 +32,7 @@ WORKDIR /src
 COPY tests/pgp/package.json tests/pgp/package-lock.json tests/pgp/
 RUN cd tests/pgp && npm ci --no-audit --no-fund
 COPY src/Nullify.WebMail/wwwroot/js/pgp/ src/Nullify.WebMail/wwwroot/js/pgp/
-COPY src/Nullify.WebMail/wwwroot/js/pgp-bridge.js src/Nullify.WebMail/wwwroot/js/
+COPY src/Nullify.WebMail/wwwroot/js/pgp-bridge.js src/Nullify.WebMail/wwwroot/js/passkey.js src/Nullify.WebMail/wwwroot/js/
 COPY tests/pgp/ tests/pgp/
 RUN cd tests/pgp && npm test
 
