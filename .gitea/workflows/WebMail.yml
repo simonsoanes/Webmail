@@ -101,8 +101,21 @@ jobs:
         if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || github.ref_type == 'tag')
         env:
           WEBHOOK: ${{ secrets.WEBMAIL_PORTAINER_WEBHOOK }}
+        # Portainer answers 500 while it is still redeploying from an earlier webhook, which happens
+        # when pushes land close together, so retry with a growing delay. Its reply is printed
+        # (curl -f would hide it) so a real failure shows its cause; the URL itself is never echoed.
         run: |
-          if [ -n "$WEBHOOK" ]; then curl -fsS -X POST "$WEBHOOK"; else echo "WEBMAIL_PORTAINER_WEBHOOK not set; skipping deploy."; fi
+          if [ -z "$WEBHOOK" ]; then echo "WEBMAIL_PORTAINER_WEBHOOK not set; skipping deploy."; exit 0; fi
+          for attempt in 1 2 3 4 5; do
+            status="$(curl -sS -o webhook-response.txt -w '%{http_code}' -X POST -H 'Content-Length: 0' "$WEBHOOK" || true)"
+            case "$status" in
+              2??) echo "Deploy triggered (HTTP $status)."; exit 0 ;;
+            esac
+            echo "Attempt $attempt: Portainer answered HTTP ${status:-000}: $(head -c 1000 webhook-response.txt 2>/dev/null)"
+            [ "$attempt" -lt 5 ] && sleep $((attempt * 15))
+          done
+          echo "Deploy webhook failed after 5 attempts."
+          exit 1
 
       - name: Clean up
         if: always()
