@@ -29,7 +29,7 @@
             </span>
         </div>
 
-        @if (showNewFolder)
+        @if (showNewFolder && newFolderParent == null)
         {
             <div class="inline-form">
                 <input @ref="newFolderInput" @bind="newFolderName" @bind:event="oninput" placeholder="Folder name"
@@ -55,11 +55,16 @@
         }
         else
         {
-            @foreach (var folder in MailFormat.OrderFolders(State.Folders))
+            var ordered = State.OrderedFolders();
+            @foreach (var folder in ordered)
             {
                 var f = folder;
                 var active = State.ActiveTab == "mail" && State.SelectedFolder == f.Name;
                 var depth = MailFormat.FolderDepth(f);
+                var dropClass = dropTarget != f.Name ? ""
+                    : State.DraggingFolder is not { } dragging ? "drop-target"
+                    : dragging == f.Name || !Siblings(dragging, f.Name) ? ""
+                    : ordered.FindIndex(x => x.Name == dragging) < ordered.FindIndex(x => x.Name == f.Name) ? "drop-after" : "drop-before";
                 @if (renaming == f.Name)
                 {
                     <div class="inline-form" style="padding-left:@(0.6 + depth * 0.9)rem;">
@@ -68,10 +73,14 @@
                     </div>
                     continue;
                 }
-                <div class="nav-item @(active ? "active" : "") @(dropTarget == f.Name ? "drop-target" : "")"
+                <div class="nav-item @(active ? "active" : "") @dropClass @(ctxFolder == f.Name ? "context" : "")"
                      style="padding-left:@(0.6 + depth * 0.9)rem;" role="button" tabindex="0"
-                     title="@f.Name"
+                     title="@f.Name" draggable="true"
                      @onclick="() => SelectFolder(f.Name)"
+                     @onkeydown="e => OnFolderKey(e, f)"
+                     @oncontextmenu="e => OpenContext(e, f.Name)" @oncontextmenu:preventDefault="true"
+                     @ondragstart="() => { State.DraggingFolder = f.Name; State.DraggingUids = Array.Empty<long>(); }"
+                     @ondragend="() => { State.DraggingFolder = null; dropTarget = null; }"
                      @ondragenter="() => dropTarget = f.Name"
                      @ondragleave="() => { if (dropTarget == f.Name) dropTarget = null; }"
                      @ondragover:preventDefault="true"
@@ -94,10 +103,48 @@
                         </span>
                     }
                 </div>
+                @if (showNewFolder && newFolderParent == f.Name)
+                {
+                    <div class="inline-form" style="padding-left:@(0.6 + (depth + 1) * 0.9)rem;">
+                        <input @ref="newFolderInput" @bind="newFolderName" @bind:event="oninput" placeholder="Subfolder name"
+                               @onkeydown="OnNewFolderKey" />
+                        <button class="btn small accent" @onclick="CreateFolder">Add</button>
+                    </div>
+                }
             }
         }
     </div>
 </div>
+
+@if (ctxAt is { } at && State.Folders.FirstOrDefault(x => x.Name == ctxFolder) is { } cf)
+{
+    var siblings = SiblingNames(cf.Name);
+    var index = siblings.IndexOf(cf.Name);
+    <ContextMenu X="at.X" Y="at.Y" OnClose="CloseContext">
+        <div class="menu-title">@MailFormat.FolderLeaf(cf)</div>
+        <button class="menu-item" @onclick="() => FromContext(() => SelectFolder(cf.Name))"><Icon Name="mail-open" Size="16" /> <span>Open</span></button>
+        <button class="menu-item" @onclick="() => FromContext(() => Actions.MarkFolderReadAsync(cf.Name))" disabled="@(cf.UnreadMessages == 0)">
+            <Icon Name="check" Size="16" /> <span>Mark all as read</span>
+        </button>
+        <div class="menu-sep"></div>
+        <button class="menu-item" @onclick="() => FromContext(() => StartNewFolder(cf.Name))"><Icon Name="folder-plus" Size="16" /> <span>New subfolder</span></button>
+        @if (cf.SpecialUse == null)
+        {
+            <button class="menu-item" @onclick="() => FromContext(() => { StartRename(cf); return Task.CompletedTask; })"><Icon Name="pen" Size="16" /> <span>Rename</span></button>
+        }
+        <button class="menu-item" @onclick="() => FromContext(() => MoveBy(cf.Name, -1))" disabled="@(index <= 0)"><Icon Name="chevron-up" Size="16" /> <span>Move up</span></button>
+        <button class="menu-item" @onclick="() => FromContext(() => MoveBy(cf.Name, 1))" disabled="@(index < 0 || index >= siblings.Count - 1)"><Icon Name="chevron-down" Size="16" /> <span>Move down</span></button>
+        @if (cf.SpecialUse != "Inbox")
+        {
+            <button class="menu-item" @onclick="() => FromContext(() => Hide(cf))"><Icon Name="eye-off" Size="16" /> <span>Hide (unsubscribe)</span></button>
+        }
+        @if (cf.SpecialUse == null)
+        {
+            <div class="menu-sep"></div>
+            <button class="menu-item danger" @onclick="() => FromContext(() => DeleteFolder(cf))"><Icon Name="trash" Size="16" /> <span>Delete folder</span></button>
+        }
+    </ContextMenu>
+}
 
 <nav class="sidebar-nav">
     @foreach (var (tab, icon, label) in Tabs())
@@ -114,7 +161,7 @@
     <button class="user-link" @onclick='() => SetTab("settings")' title="Account settings">
         <span class="avatar sm" style="--hue:@MailFormat.AvatarHue(me)">@MailFormat.Initials(me)</span>
         <span class="who">
-            <strong>@State.Session?.Email</strong>
+            <strong title="@State.Session?.Email">@(State.Senders.FirstOrDefault()?.Name is { Length: > 0 } name ? name : State.Session?.Email)</strong>
             <span>@(UserSession.QrSessionExpiresUtc is { } until ? $"Signed in by phone until {TimeZoneInfo.ConvertTime(until, State.TimeZone):t}" : State.IsAdmin ? "Administrator" : "Signed in")</span>
         </span>
     </button>
@@ -133,6 +180,11 @@
     private string renameValue = "";
     private string? dropTarget;
     private int loadedVersion = -1;
+    // The folder a new folder goes under (null: top level).
+    private string? newFolderParent;
+    // The right-click menu: where, and for which folder.
+    private (double X, double Y)? ctxAt;
+    private string? ctxFolder;
 
     private IEnumerable<(string Tab, string Icon, string Label)> Tabs()
     {
@@ -205,6 +257,14 @@
     private async Task Drop(string folder)
     {
         dropTarget = null;
+        if (State.DraggingFolder is { } dragged)
+        {
+            State.DraggingFolder = null;
+            var ordered = State.OrderedFolders();
+            var after = ordered.FindIndex(f => f.Name == dragged) < ordered.FindIndex(f => f.Name == folder);
+            await Reorder(dragged, folder, after);
+            return;
+        }
         var uids = State.DraggingUids;
         State.DraggingUids = Array.Empty<long>();
         if (uids.Count == 0 || folder == State.SelectedFolder) return;
@@ -212,11 +272,96 @@
         await Actions.MoveAsync(uids, folder);
     }
 
+    // ---- folder order ----
+
+    private List<string> SiblingNames(string name)
+    {
+        var names = State.Folders.Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
+        var folder = State.Folders.FirstOrDefault(f => f.Name == name);
+        if (folder == null) return [];
+        var parent = MailFormat.ParentOf(folder, names);
+        return State.OrderedFolders().Where(f => MailFormat.ParentOf(f, names) == parent).Select(f => f.Name).ToList();
+    }
+
+    private bool Siblings(string a, string b) => SiblingNames(a).Contains(b);
+
+    private async Task Reorder(string dragged, string target, bool after)
+    {
+        var order = MailFormat.MoveFolder(State.Folders, State.FolderOrder, dragged, target, after);
+        if (order == null)
+        {
+            if (dragged != target) State.ShowToast("Folders can be re-ordered only among folders at the same level.", isError: true);
+            return;
+        }
+        State.FolderOrder = order;
+        State.NotifyStateChanged();
+        try { await Api.SetPreferenceAsync(AppState.FolderOrderKey, JsonSerializer.Serialize(order)); }
+        catch (Exception ex) { State.ShowToast($"Could not save the folder order: {ex.Message}", isError: true); }
+    }
+
+    private async Task MoveBy(string name, int offset)
+    {
+        var siblings = SiblingNames(name);
+        var index = siblings.IndexOf(name);
+        var target = index + offset;
+        if (index < 0 || target < 0 || target >= siblings.Count) return;
+        await Reorder(name, siblings[target], after: offset > 0);
+    }
+
+    private async Task OnFolderKey(KeyboardEventArgs e, FolderInfo f)
+    {
+        if (e.Key == "Enter") await SelectFolder(f.Name);
+        else if (e.AltKey && e.Key is "ArrowUp" or "ArrowDown") await MoveBy(f.Name, e.Key == "ArrowUp" ? -1 : 1);
+    }
+
+    // ---- context menu ----
+
+    private void OpenContext(MouseEventArgs e, string folder)
+    {
+        ctxFolder = folder;
+        ctxAt = (e.ClientX, e.ClientY);
+    }
+
+    private void CloseContext()
+    {
+        ctxAt = null;
+        ctxFolder = null;
+    }
+
+    private async Task FromContext(Func<Task> action)
+    {
+        CloseContext();
+        await action();
+    }
+
+    private async Task Hide(FolderInfo f)
+    {
+        try
+        {
+            await Api.SetFolderShownAsync(f.Name, false);
+            State.ShowToast($"\"{MailFormat.FolderLeaf(f)}\" hidden. Show it again from Settings › Folders.");
+            if (State.SelectedFolder == f.Name)
+            {
+                State.SelectedFolder = "INBOX";
+                State.SelectedMessageUid = null;
+            }
+            await Refresh();
+            State.NotifyStateChanged();
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Could not hide the folder: {ex.InnerException?.Message ?? ex.Message}", isError: true);
+        }
+    }
+
     // ---- folder management ----
 
-    private async Task StartNewFolder()
+    private async Task StartNewFolder() => await StartNewFolder(null);
+
+    private async Task StartNewFolder(string? parent)
     {
-        showNewFolder = !showNewFolder;
+        showNewFolder = parent != null || !showNewFolder || newFolderParent != null;
+        newFolderParent = parent;
         if (showNewFolder)
         {
             StateHasChanged();
@@ -233,14 +378,17 @@
 
     private async Task CreateFolder()
     {
-        var name = newFolderName.Trim();
-        if (name.Length == 0) return;
+        var leaf = newFolderName.Trim();
+        if (leaf.Length == 0) return;
+        var parent = newFolderParent == null ? null : State.Folders.FirstOrDefault(f => f.Name == newFolderParent);
+        var name = parent is { Delimiter.Length: > 0 } ? parent.Name + parent.Delimiter + leaf : leaf;
         try
         {
             await Api.CreateFolderAsync(name);
-            State.ShowToast($"Folder \"{name}\" created");
+            State.ShowToast($"Folder \"{leaf}\" created");
             newFolderName = "";
             showNewFolder = false;
+            newFolderParent = null;
             await Refresh();
         }
         catch (Exception ex)

@@ -1,0 +1,95 @@
+@using Nullify.WebMail.Services
+@inject AppState State
+@inject MailActions Actions
+
+@* Tags for some messages: tick to add or remove, type to search or make a new one. *@
+@{
+    var tags = AllTags();
+    var term = search.Trim();
+    var shown = term.Length == 0 ? tags
+        : tags.Where(t => MailTags.Label(t).Contains(term, StringComparison.OrdinalIgnoreCase)).ToList();
+    var newKeyword = term.Length > 0 && State.CanCreateTags
+                     && !tags.Any(t => MailTags.Label(t).Equals(term, StringComparison.OrdinalIgnoreCase))
+        ? MailTags.ToKeyword(term) : null;
+    var messages = State.CurrentMessages.Where(m => Uids.Contains(m.Uid)).ToList();
+}
+<div class="menu-search">
+    <Icon Name="search" Size="14" />
+    <input @bind="search" @bind:event="oninput" @onkeydown="OnKey" placeholder="Search in tags" aria-label="Search in tags" />
+</div>
+@if (!State.TagsSupported)
+{
+    <div class="menu-note">This mail server doesn't support tags in this folder.</div>
+}
+else
+{
+    <div class="menu-scroll">
+        @foreach (var tag in shown)
+        {
+            var t = tag;
+            var count = messages.Count(m => m.Keywords.Contains(t, StringComparer.OrdinalIgnoreCase));
+            var on = messages.Count > 0 && count == messages.Count;
+            <button class="menu-item tag-item" role="menuitemcheckbox" aria-checked="@(on ? "true" : count > 0 ? "mixed" : "false")"
+                    @onclick="() => Toggle(t, !on)">
+                <span class="tag-swatch" style="background:@MailTags.Color(t);"></span>
+                <span>@MailTags.Label(t)</span>
+                <span class="spacer"></span>
+                @if (on) { <Icon Name="check" Size="14" /> }
+                else if (count > 0) { <span class="muted">–</span> }
+            </button>
+        }
+        @if (shown.Count == 0 && newKeyword == null)
+        {
+            <div class="menu-note">@(tags.Count == 0 ? "No tags yet." : "No matching tags.")@(State.CanCreateTags && tags.Count == 0 ? " Type a name to make one." : "")</div>
+        }
+        @if (newKeyword != null)
+        {
+            <button class="menu-item" @onclick="() => Toggle(newKeyword, true)">
+                <Icon Name="plus" Size="14" /> <span>New tag “@term”</span>
+            </button>
+        }
+    </div>
+    <div class="menu-sep"></div>
+    <button class="menu-item" @onclick="Clear" disabled="@(!messages.Any(m => MailTags.Tags(m.Keywords).Any()))">
+        <span class="tag-swatch none"></span><span>None</span>
+    </button>
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyCollection<long> Uids { get; set; } = [];
+    [Parameter] public EventCallback OnDone { get; set; }
+
+    private string search = "";
+
+    private List<string> AllTags() =>
+        State.FolderTags.Concat(State.CurrentMessages.SelectMany(m => m.Keywords))
+            .Where(MailTags.IsTag)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(MailTags.Label, StringComparer.CurrentCultureIgnoreCase)
+            .ToList();
+
+    private async Task Toggle(string keyword, bool on)
+    {
+        search = "";
+        await Actions.SetTagAsync(Uids, keyword, on);
+        await OnDone.InvokeAsync();
+    }
+
+    private async Task Clear()
+    {
+        await Actions.ClearTagsAsync(Uids);
+        await OnDone.InvokeAsync();
+    }
+
+    private async Task OnKey(KeyboardEventArgs e)
+    {
+        if (e.Key != "Enter") return;
+        var term = search.Trim();
+        if (term.Length == 0) return;
+        var tags = AllTags();
+        var match = tags.FirstOrDefault(t => MailTags.Label(t).Equals(term, StringComparison.OrdinalIgnoreCase))
+                    ?? tags.FirstOrDefault(t => MailTags.Label(t).Contains(term, StringComparison.OrdinalIgnoreCase));
+        if (match != null) await Toggle(match, true);
+        else if (State.CanCreateTags && MailTags.ToKeyword(term) is { } created) await Toggle(created, true);
+    }
+}

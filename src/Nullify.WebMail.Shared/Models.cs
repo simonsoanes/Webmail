@@ -10,16 +10,24 @@ public sealed record LoginResponse(bool Success, string? Error);
 
 public sealed record SessionInfo(string Username, string Email, string? DisplayName);
 
+/// <param name="IsSubscribed">The user is subscribed to this folder on the server (LSUB).</param>
 public sealed record FolderInfo(
     string Name, string? Attributes, int TotalMessages, int UnreadMessages,
-    string? Delimiter = null, string? SpecialUse = null);
+    string? Delimiter = null, string? SpecialUse = null, bool IsSubscribed = true);
 
 public sealed record MessageSummary(
     long Uid, string Subject, string From, string To, string Date, long Size,
     bool IsSeen, bool IsFlagged, bool IsAnswered, bool IsDraft, string MessageId,
-    bool HasAttachments = false);
+    bool HasAttachments = false)
+{
+    /// <summary>IMAP keywords on the message (tags), as stored on the server.</summary>
+    public IReadOnlyList<string> Keywords { get; init; } = [];
+}
 
-public sealed record MessagePage(IReadOnlyList<MessageSummary> Messages, int Total, int Page, int PageSize);
+/// <param name="Keywords">Tags the server lists for the folder.</param>
+/// <param name="CanCreateKeywords">The server accepts new tags in this folder.</param>
+public sealed record MessagePage(IReadOnlyList<MessageSummary> Messages, int Total, int Page, int PageSize,
+    IReadOnlyList<string>? Keywords = null, bool CanCreateKeywords = false);
 
 public sealed record MessageContent(
     string Source, string? HtmlBody, string? TextBody,
@@ -68,6 +76,17 @@ public sealed record FlagRequest(string? AddFlags, string? RemoveFlags);
 public sealed record SieveScriptDto(string Name, bool IsActive, string Content);
 
 public sealed record PreferenceDto(string Key, string? Value);
+
+/// <summary>An address the user can send as, with the name shown to recipients.</summary>
+public sealed record SenderIdentity(string Name, string Email)
+{
+    public override string ToString() => string.IsNullOrWhiteSpace(Name) ? Email : $"{Name} <{Email}>";
+}
+
+/// <param name="Login">The sign-in address: always a sender.</param>
+/// <param name="AliasDomains">Domains the administrator allows aliases at.</param>
+public sealed record IdentitySettingsDto(
+    string? DisplayName, string Login, IReadOnlyList<SenderIdentity> Aliases, IReadOnlyList<string> AliasDomains);
 
 /// <summary>How a stored secret key is protected. The server only ever holds the protected form.</summary>
 public enum PgpProtection { Passphrase, SecurityKey }

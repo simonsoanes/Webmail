@@ -30,6 +30,84 @@
         </div>
     </section>
 
+    <section class="card" id="identity-settings">
+        <div class="card-head">
+            <div class="icon-tile"><Icon Name="user" /></div>
+            <div><h3>Name &amp; addresses</h3><p>How you appear to the people you write to.</p></div>
+        </div>
+        @if (identity == null)
+        {
+            <p class="muted">Loading…</p>
+        }
+        else
+        {
+            <div class="field">
+                <label for="display-name">Display name</label>
+                <div class="input-row">
+                    <input id="display-name" type="text" @bind="displayName" @bind:event="oninput" maxlength="@IdentityService.MaxNameLength"
+                           placeholder="Your name" autocomplete="name" @onkeydown="OnDisplayNameKey" />
+                    <button class="btn accent" @onclick="SaveDisplayName" disabled="@(identityBusy || IdentityService.CleanName(displayName) == (identity.DisplayName ?? ""))">Save</button>
+                </div>
+                <span class="help">Mail from @identity.Login is shown as “@(new SenderIdentity(IdentityService.CleanName(displayName), identity.Login))”.</span>
+            </div>
+
+            <h4 class="sub-head">Aliases</h4>
+            @if (identity.AliasDomains.Count == 0)
+            {
+                <div class="notice"><Icon Name="shield" Size="15" /><span>Your administrator hasn't allowed sending from other addresses.</span></div>
+            }
+            else
+            {
+                <p class="help" style="margin-top:0;">
+                    Send from other addresses at @string.Join(", ", identity.AliasDomains), each with its own name.
+                    Your mail server must also accept mail sent from them.
+                </p>
+            }
+            @foreach (var alias in identity.Aliases)
+            {
+                var a = alias;
+                var allowed = IdentityService.DomainAllowed(a.Email, identity.AliasDomains);
+                <div class="setting-row alias-row">
+                    <div>
+                        <strong>@(a.Name.Length > 0 ? a.Name : "(no name)")</strong>
+                        <div class="desc">@a.Email @if (!allowed) { <span class="tag">No longer allowed</span> }</div>
+                    </div>
+                    <span class="btn-group">
+                        @if (allowed)
+                        {
+                            <button class="btn small ghost" @onclick="() => EditAlias(a)" disabled="@identityBusy">Edit</button>
+                        }
+                        <button class="btn small danger" @onclick="() => RemoveAlias(a)" disabled="@identityBusy">Remove</button>
+                    </span>
+                </div>
+            }
+            @if (identity.AliasDomains.Count > 0)
+            {
+                <div class="field-row" style="margin-top:.75rem;">
+                    <div class="field">
+                        <label for="alias-name">Name</label>
+                        <input id="alias-name" type="text" @bind="aliasName" @bind:event="oninput" maxlength="@IdentityService.MaxNameLength"
+                               placeholder="@(identity.DisplayName ?? "Name shown with this address")" />
+                    </div>
+                    <div class="field">
+                        <label for="alias-email">Address</label>
+                        <input id="alias-email" type="email" @bind="aliasEmail" @bind:event="oninput" autocomplete="off" spellcheck="false"
+                               placeholder="@($"someone@{identity.AliasDomains[0]}")" @onkeydown="OnAliasKey" />
+                    </div>
+                </div>
+                <div class="card-actions">
+                    @if (editingAlias)
+                    {
+                        <button class="btn ghost" @onclick="CancelAlias">Cancel</button>
+                    }
+                    <button class="btn accent" @onclick="SaveAlias" disabled="@(identityBusy || aliasEmail.Trim().Length == 0)">
+                        @(editingAlias ? "Save alias" : "Add alias")
+                    </button>
+                </div>
+            }
+        }
+    </section>
+
     <section class="card">
         <div class="card-head">
             <div class="icon-tile"><Icon Name="pen" /></div>
@@ -55,6 +133,45 @@
                 @(saving ? "Saving…" : "Save changes")
             </button>
         </div>
+    </section>
+
+    <section class="card" id="folder-settings">
+        <div class="card-head">
+            <div class="icon-tile"><Icon Name="folder" /></div>
+            <div><h3>Folders</h3><p>Choose which folders on your mail server appear in the folder list. This is your server subscription, so other mail apps see the same choice.</p></div>
+        </div>
+        @if (allFolders == null)
+        {
+            <p class="muted">@(foldersError ?? "Loading…")</p>
+        }
+        else
+        {
+            var noneSubscribed = !allFolders.Any(f => f.IsSubscribed);
+            @if (noneSubscribed)
+            {
+                <div class="notice"><Icon Name="folder" Size="15" /><span>You aren't subscribed to any folders, so all of them are shown.</span></div>
+            }
+            <div class="folder-subs">
+                @foreach (var folder in MailFormat.OrderFolders(allFolders, State.FolderOrder))
+                {
+                    var f = folder;
+                    var isInbox = f.SpecialUse == "Inbox";
+                    var shown = isInbox || noneSubscribed || f.IsSubscribed;
+                    <label class="folder-sub" style="padding-left:@(0.25 + MailFormat.FolderDepth(f) * 1.1)rem;">
+                        <input type="checkbox" checked="@shown" disabled="@(isInbox || folderBusy)" @onchange="e => SetShown(f, e.Value is true)" />
+                        <Icon Name="@MailFormat.FolderIcon(f)" Size="15" />
+                        <span>@MailFormat.FolderLeaf(f)</span>
+                    </label>
+                }
+            </div>
+            <div class="card-actions">
+                @if (State.FolderOrder.Count > 0)
+                {
+                    <button class="btn ghost" @onclick="ResetFolderOrder" style="margin-right:auto;">Reset folder order</button>
+                }
+                <span class="help" style="margin:0;">Drag folders in the folder list to re-order them.</span>
+            </div>
+        }
     </section>
 
     <section class="card">
@@ -330,8 +447,122 @@
     {
         composeFont = State.ComposeFont;
         signature = State.Signature;
+        await LoadIdentity();
         await LoadDav();
         await LoadDocs();
+        await LoadFolders();
+    }
+
+    // ---- name & aliases ----
+
+    private IdentitySettingsDto? identity;
+    private string displayName = "", aliasName = "", aliasEmail = "";
+    private bool identityBusy, editingAlias;
+
+    private async Task LoadIdentity()
+    {
+        try
+        {
+            identity = await Api.GetIdentityAsync();
+            displayName = identity.DisplayName ?? "";
+            State.Senders = await Api.GetSendersAsync();
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Could not load your name and addresses: {ex.Message}", isError: true);
+        }
+    }
+
+    private async Task IdentityChange(Func<Task> change, string done)
+    {
+        identityBusy = true;
+        try
+        {
+            await change();
+            State.ShowToast(done);
+            await LoadIdentity();
+        }
+        catch (InvalidOperationException ex) { State.ShowToast(ex.Message, isError: true); }
+        catch (Exception ex) { State.ShowToast($"Could not save: {ex.Message}", isError: true); }
+        finally { identityBusy = false; }
+    }
+
+    private Task SaveDisplayName() => IdentityChange(() => Api.SetDisplayNameAsync(displayName), "Display name saved");
+
+    private async Task OnDisplayNameKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await SaveDisplayName();
+    }
+
+    private async Task SaveAlias()
+    {
+        var name = aliasName;
+        var email = aliasEmail.Trim();
+        await IdentityChange(() => Api.SaveAliasAsync(name, email), editingAlias ? "Alias saved" : $"Added {email}");
+        if (identity?.Aliases.Any(a => a.Email.Equals(email, StringComparison.OrdinalIgnoreCase)) == true) CancelAlias();
+    }
+
+    private async Task OnAliasKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await SaveAlias();
+    }
+
+    private void EditAlias(SenderIdentity alias)
+    {
+        aliasName = alias.Name;
+        aliasEmail = alias.Email;
+        editingAlias = true;
+    }
+
+    private void CancelAlias()
+    {
+        aliasName = aliasEmail = "";
+        editingAlias = false;
+    }
+
+    private async Task RemoveAlias(SenderIdentity alias)
+    {
+        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Stop sending as {alias.Email}?")) return;
+        await IdentityChange(() => Api.RemoveAliasAsync(alias.Email), $"Removed {alias.Email}");
+    }
+
+    // ---- folders ----
+
+    private IReadOnlyList<FolderInfo>? allFolders;
+    private string? foldersError;
+    private bool folderBusy;
+
+    private async Task LoadFolders()
+    {
+        try { allFolders = await Api.GetAllFoldersAsync(); }
+        catch (Exception ex) { foldersError = $"Could not load folders: {ex.InnerException?.Message ?? ex.Message}"; }
+    }
+
+    private async Task SetShown(FolderInfo f, bool shown)
+    {
+        folderBusy = true;
+        try
+        {
+            await Api.SetFolderShownAsync(f.Name, shown);
+            await LoadFolders();
+            if (!shown && State.SelectedFolder == f.Name) State.SelectedFolder = "INBOX";
+            State.FoldersVersion++;
+            State.NotifyStateChanged();
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Could not {(shown ? "subscribe to" : "unsubscribe from")} {MailFormat.FolderLeaf(f)}: {ex.InnerException?.Message ?? ex.Message}", isError: true);
+            await LoadFolders();
+        }
+        finally { folderBusy = false; }
+    }
+
+    private async Task ResetFolderOrder()
+    {
+        State.FolderOrder = [];
+        State.NotifyStateChanged();
+        try { await Api.SetPreferenceAsync(AppState.FolderOrderKey, null); }
+        catch (Exception ex) { State.ShowToast($"Could not reset the folder order: {ex.Message}", isError: true); }
     }
 
     private async Task LoadDav()

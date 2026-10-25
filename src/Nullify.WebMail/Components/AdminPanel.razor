@@ -69,6 +69,10 @@
                     {
                         <span class="tag">Title: @title</span>
                     }
+                    @if (aliasDomains.Contains(d.Name))
+                    {
+                        <span class="tag" style="background:var(--accent-soft);color:var(--accent);">Aliases on</span>
+                    }
                     @if (docsDomains.Contains(d.Name))
                     {
                         <span class="tag" style="background:var(--accent-soft);color:var(--accent);">Documents on</span>
@@ -142,6 +146,14 @@
                 <input type="checkbox" class="switch" @bind="editWebDavEnabled" />
                 Turn on Documents for every user in this domain
             </label>
+            <h4 style="font-size:.85rem;margin:.5rem 0 .3rem;">Sending</h4>
+            <label style="font-size:.85rem;display:flex;align-items:center;gap:.5rem;margin-bottom:.3rem;">
+                <input type="checkbox" class="switch" @bind="editAliasesAllowed" />
+                Let users add sender aliases at this domain
+            </label>
+            <p class="muted" style="font-size:.78rem;margin-bottom:.75rem;">
+                Users choose the address and the name shown with it. Your SMTP server should still check that each user may send as the address.
+            </p>
             <div style="display:flex;gap:.4rem;">
                 <button class="btn accent" @onclick="SaveDomain" disabled="@saving">
                     @(saving ? "Saving..." : "Save")
@@ -217,6 +229,8 @@
     private bool editWebDavEnabled;
     private string editTitle = "";
     private HashSet<string> docsDomains = new();
+    private HashSet<string> aliasDomains = new();
+    private bool editAliasesAllowed;
     private Dictionary<string, string> domainTitles = new();
     private string instanceTitle = "";
 
@@ -234,10 +248,12 @@
             restrictDomains = await Api.GetAdminSettingAsync("restrict_domains") == "true";
             instanceTitle = await Branding.InstanceTitleAsync() ?? "";
             docsDomains = new();
+            aliasDomains = new();
             domainTitles = new();
             foreach (var d in domains)
             {
                 if ((await Docs.DomainSettingsAsync(d.Name)).Enabled) docsDomains.Add(d.Name);
+                if (await Api.DomainAllowsAliasesAsync(d.Name)) aliasDomains.Add(d.Name);
                 if (await Branding.DomainTitleAsync(d.Name) is { } title) domainTitles[d.Name] = title;
             }
         }
@@ -259,6 +275,7 @@
         editSieveHost = ""; editSievePort = DefaultSievePort;
         editCalDavUrl = ""; editCardDavUrl = "";
         editWebDavUrl = ""; editWebDavEnabled = false;
+        editAliasesAllowed = false;
         showEditForm = true;
     }
 
@@ -267,6 +284,7 @@
         var (docsOn, docsUrl) = await Docs.DomainSettingsAsync(d.Name);
         editWebDavEnabled = docsOn;
         editWebDavUrl = docsUrl ?? "";
+        editAliasesAllowed = aliasDomains.Contains(d.Name);
         editingExisting = true;
         editName = d.Name;
         editTitle = domainTitles.GetValueOrDefault(d.Name) ?? "";
@@ -309,6 +327,7 @@
             else
                 await Api.CreateDomainAsync(dto);
             await Docs.SetDomainSettingsAsync(dto.Name, editWebDavEnabled, editWebDavUrl);
+            await Api.SetDomainAllowsAliasesAsync(dto.Name, editAliasesAllowed);
             await Branding.SetDomainTitleAsync(dto.Name, editTitle);
             await RefreshBrand();
 
@@ -329,6 +348,7 @@
         {
             await Api.DeleteDomainAsync(name);
             await Branding.SetDomainTitleAsync(name, null);
+            await Api.SetDomainAllowsAliasesAsync(name, false);
             await RefreshBrand();
             status = "Domain deleted.";
             await LoadData();

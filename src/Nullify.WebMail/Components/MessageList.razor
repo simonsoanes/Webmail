@@ -46,6 +46,20 @@
         <span class="spacer"></span>
         <button class="icon-btn" title="Mark as read" @onclick="() => Bulk(u => Actions.SetSeenAsync(u, true))"><Icon Name="mail-open" Size="17" /></button>
         <button class="icon-btn" title="Mark as unread" @onclick="() => Bulk(u => Actions.SetSeenAsync(u, false))"><Icon Name="mail" Size="17" /></button>
+        <button class="icon-btn" title="Star" @onclick="() => Bulk(u => Actions.SetFlaggedAsync(u, !AllFlagged(u)))"><Icon Name="star" Size="17" /></button>
+        @if (State.TagsSupported)
+        {
+            <span class="menu-anchor">
+                <button class="icon-btn" title="Tags" @onclick="() => bulkTagsOpen = !bulkTagsOpen" aria-haspopup="menu" aria-expanded="@bulkTagsOpen"><Icon Name="tag" Size="17" /></button>
+                @if (bulkTagsOpen)
+                {
+                    <div class="menu-backdrop" @onclick="() => bulkTagsOpen = false"></div>
+                    <div class="menu tag-menu" role="menu">
+                        <TagMenu Uids="State.CheckedUids.ToList()" OnDone="() => bulkTagsOpen = false" />
+                    </div>
+                }
+            </span>
+        }
         <button class="icon-btn" title="Archive" @onclick="() => Bulk(Actions.ArchiveAsync, clear: true)"><Icon Name="archive" Size="17" /></button>
         <MoveMenu OnMove="dest => Bulk(u => Actions.MoveAsync(u, dest), clear: true)" />
         <button class="icon-btn" title="Delete" @onclick="() => Bulk(Actions.DeleteAsync, clear: true)"><Icon Name="trash" Size="17" /></button>
@@ -105,9 +119,10 @@
             var m = msg;
             var who = MailFormat.ParseAddress(isSentLike ? FirstRecipient(m.To) : m.From);
             var isChecked = State.CheckedUids.Contains(m.Uid);
-            <div class="msg-row @(State.SelectedMessageUid == m.Uid ? "active" : "") @(m.IsSeen ? "" : "unread") @(isChecked ? "checked" : "")"
+            <div class="msg-row @(State.SelectedMessageUid == m.Uid ? "active" : "") @(m.IsSeen ? "" : "unread") @(isChecked ? "checked" : "") @(ctxAt != null && ctxUids.Contains(m.Uid) ? "context" : "")"
                  draggable="true" @ondragstart="() => DragStart(m.Uid)"
-                 @onclick="() => Open(m.Uid)">
+                 @onclick="e => RowClick(e, m.Uid)"
+                 @oncontextmenu="e => OpenContext(e, m.Uid)" @oncontextmenu:preventDefault="true">
                 <div class="lead" @onclick:stopPropagation="true">
                     <div class="avatar" style="--hue:@MailFormat.AvatarHue(who)">@MailFormat.Initials(who)</div>
                     <input type="checkbox" checked="@isChecked" @onchange="() => ToggleCheck(m.Uid)" aria-label="Select message" />
@@ -119,6 +134,15 @@
                     </div>
                     <div class="msg-line">
                         @if (m.IsDraft) { <span class="tag draft">Draft</span> }
+                        @{ var tags = MailTags.Tags(m.Keywords).ToList(); }
+                        @foreach (var t in tags.Take(2))
+                        {
+                            <span class="tag-chip" style="--tag:@MailTags.Color(t)" title="@MailTags.Label(t)">@MailTags.Label(t)</span>
+                        }
+                        @if (tags.Count > 2)
+                        {
+                            <span class="tag-chip more" title="@string.Join(", ", tags.Skip(2).Select(MailTags.Label))">+@(tags.Count - 2)</span>
+                        }
                         <span class="msg-subject">@(string.IsNullOrWhiteSpace(m.Subject) ? "(no subject)" : m.Subject)</span>
                         <span class="msg-badges">
                             @if (m.IsAnswered) { <span title="Replied"><Icon Name="reply" Size="13" /></span> }
@@ -142,6 +166,71 @@
     }
 </div>
 
+@if (ctxAt is { } at)
+{
+    var targets = ctxUids;
+    var single = targets.Count == 1 ? Actions.Find(targets.First()) : null;
+    var anyUnread = targets.Any(u => Actions.Find(u) is { IsSeen: false });
+    var flagged = AllFlagged(targets);
+    var junk = State.FindSpecialFolder("Junk");
+    <ContextMenu X="at.X" Y="at.Y" OnClose="CloseContext">
+        @if (ctxView == "move")
+        {
+            <button class="menu-item" @onclick='() => ctxView = "main"'><Icon Name="chevron-left" Size="16" /> <span>Move to</span></button>
+            <div class="menu-sep"></div>
+            <div class="menu-scroll">
+                @foreach (var f in State.OrderedFolders().Where(f => f.Name != State.SelectedFolder))
+                {
+                    var dest = f.Name;
+                    <button class="menu-item" style="padding-left:@(0.6 + MailFormat.FolderDepth(f) * 0.9)rem;"
+                            @onclick="() => FromContext(u => Actions.MoveAsync(u, dest), clear: true)">
+                        <Icon Name="@MailFormat.FolderIcon(f)" Size="16" /> <span>@MailFormat.FolderLeaf(f)</span>
+                    </button>
+                }
+            </div>
+        }
+        else if (ctxView == "tags")
+        {
+            <button class="menu-item" @onclick='() => ctxView = "main"'><Icon Name="chevron-left" Size="16" /> <span>Tags</span></button>
+            <div class="menu-sep"></div>
+            <TagMenu Uids="targets" OnDone="CloseContext" />
+        }
+        else
+        {
+            @if (single != null)
+            {
+                <button class="menu-item" @onclick="() => OpenFromContext(single.Uid)"><Icon Name="mail-open" Size="16" /> <span>Open</span></button>
+                <button class="menu-item" @onclick="() => ReplyFromContext(ComposeMode.Reply, single.Uid)"><Icon Name="reply" Size="16" /> <span>Reply</span></button>
+                <button class="menu-item" @onclick="() => ReplyFromContext(ComposeMode.ReplyAll, single.Uid)"><Icon Name="reply-all" Size="16" /> <span>Reply all</span></button>
+                <button class="menu-item" @onclick="() => ReplyFromContext(ComposeMode.Forward, single.Uid)"><Icon Name="forward" Size="16" /> <span>Forward</span></button>
+            }
+            else
+            {
+                <div class="menu-title">@targets.Count messages</div>
+            }
+            <div class="menu-sep"></div>
+            <button class="menu-item" @onclick="() => FromContext(u => Actions.SetSeenAsync(u, anyUnread))">
+                <Icon Name="@(anyUnread ? "mail-open" : "mail")" Size="16" /> <span>@(anyUnread ? "Mark as read" : "Mark as unread")</span>
+            </button>
+            <button class="menu-item" @onclick="() => FromContext(u => Actions.SetFlaggedAsync(u, !flagged))">
+                <Icon Name="star" Size="16" Filled="flagged" /> <span>@(flagged ? "Remove star" : "Star")</span>
+            </button>
+            @if (State.TagsSupported)
+            {
+                <button class="menu-item" @onclick='() => ctxView = "tags"'><Icon Name="tag" Size="16" /> <span>Tags</span><span class="spacer"></span><Icon Name="chevron-right" Size="14" /></button>
+            }
+            <div class="menu-sep"></div>
+            <button class="menu-item" @onclick='() => ctxView = "move"'><Icon Name="folder-input" Size="16" /> <span>Move to</span><span class="spacer"></span><Icon Name="chevron-right" Size="14" /></button>
+            <button class="menu-item" @onclick="() => FromContext(Actions.ArchiveAsync, clear: true)"><Icon Name="archive" Size="16" /> <span>Archive</span></button>
+            @if (junk != null && junk.Name != State.SelectedFolder)
+            {
+                <button class="menu-item" @onclick="() => FromContext(Actions.JunkAsync, clear: true)"><Icon Name="alert" Size="16" /> <span>Move to Junk</span></button>
+            }
+            <button class="menu-item danger" @onclick="() => FromContext(Actions.DeleteAsync, clear: true)"><Icon Name="trash" Size="16" /> <span>Delete</span></button>
+        }
+    </ContextMenu>
+}
+
 @code {
     [Parameter] public EventCallback OnMenu { get; set; }
 
@@ -151,6 +240,15 @@
     private bool loading;
     private bool showSkeleton;
     private int loadToken;
+    private bool bulkTagsOpen;
+
+    // Shift-click selects from here: the last message clicked or ticked.
+    private long? anchorUid;
+
+    // The right-click menu: where, for which messages, and which list it shows (main, move, tags).
+    private (double X, double Y)? ctxAt;
+    private IReadOnlyCollection<long> ctxUids = [];
+    private string ctxView = "main";
 
     // Only refetch when the folder or the list version actually changes — a full
     // IMAP SELECT+FETCH on every state change (e.g. each message click) is far too chatty.
@@ -211,6 +309,8 @@
             {
                 State.CurrentMessages = result.Messages;
                 State.CurrentTotal = result.Total;
+                State.FolderTags = result.Keywords?.Where(MailTags.IsTag).ToList() ?? [];
+                State.CanCreateTags = result.CanCreateKeywords;
                 // A page beyond the end (after deletes) snaps back.
                 if (result.Messages.Count == 0 && State.CurrentPage > 0)
                 {
@@ -237,10 +337,79 @@
         State.NotifyStateChanged();
     }
 
+    /// <summary>Click opens; Ctrl/Cmd-click adds or removes one message; Shift-click selects a run.</summary>
+    private void RowClick(MouseEventArgs e, long uid)
+    {
+        var additive = e.CtrlKey || e.MetaKey;
+        if (e.ShiftKey)
+        {
+            var list = State.CurrentMessages.Select(m => m.Uid).ToList();
+            var to = list.IndexOf(uid);
+            var from = list.IndexOf(anchorUid ?? State.SelectedMessageUid ?? uid);
+            if (from < 0) from = to;
+            if (!additive) State.CheckedUids.Clear();
+            State.CheckedUids.UnionWith(list.Skip(Math.Min(from, to)).Take(Math.Abs(to - from) + 1));
+            anchorUid ??= uid;
+            State.NotifyStateChanged();
+            return;
+        }
+        if (additive)
+        {
+            // Starting a selection from the open message keeps it in the selection.
+            if (State.CheckedUids.Count == 0 && State.SelectedMessageUid is { } open && open != uid
+                && State.CurrentMessages.Any(m => m.Uid == open))
+                State.CheckedUids.Add(open);
+            ToggleCheck(uid);
+            return;
+        }
+        anchorUid = uid;
+        State.CheckedUids.Clear();
+        Open(uid);
+    }
+
     private void ToggleCheck(long uid)
     {
+        anchorUid = uid;
         if (!State.CheckedUids.Remove(uid)) State.CheckedUids.Add(uid);
         State.NotifyStateChanged();
+    }
+
+    private bool AllFlagged(IEnumerable<long> uids) => uids.All(u => Actions.Find(u) is { IsFlagged: true });
+
+    /// <summary>Right-click acts on the selection when the message is part of it, else on that message alone.</summary>
+    private void OpenContext(MouseEventArgs e, long uid)
+    {
+        ctxUids = State.CheckedUids.Contains(uid) ? State.CheckedUids.ToList() : [uid];
+        ctxAt = (e.ClientX, e.ClientY);
+        ctxView = "main";
+    }
+
+    private void CloseContext()
+    {
+        ctxAt = null;
+        ctxView = "main";
+    }
+
+    private async Task FromContext(Func<IReadOnlyCollection<long>, Task> action, bool clear = false)
+    {
+        var uids = ctxUids;
+        CloseContext();
+        if (clear) State.CheckedUids.ExceptWith(uids);
+        await action(uids);
+    }
+
+    private void OpenFromContext(long uid)
+    {
+        CloseContext();
+        anchorUid = uid;
+        Open(uid);
+    }
+
+    private void ReplyFromContext(ComposeMode mode, long uid)
+    {
+        CloseContext();
+        State.SelectedMessageUid = uid;
+        State.StartCompose(mode, State.SelectedFolder, uid);
     }
 
     private void ToggleAll(ChangeEventArgs e)
@@ -260,6 +429,7 @@
     private void DragStart(long uid)
     {
         // Dragging a ticked row drags the whole selection.
+        State.DraggingFolder = null;
         State.DraggingUids = State.CheckedUids.Contains(uid) ? State.CheckedUids.ToList() : [uid];
     }
 

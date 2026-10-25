@@ -108,6 +108,13 @@ window.nullifyApp = (() => {
 
     restoreWidths();
 
+    // Firefox only starts a drag when the drag carries some data; Blazor's handlers don't set any.
+    document.addEventListener('dragstart', (e) => {
+        const el = e.target;
+        if (!el || !el.closest || !el.closest('.msg-row, .nav-item[draggable="true"]') || !e.dataTransfer) return;
+        if (e.dataTransfer.types.length === 0) e.dataTransfer.setData('text/plain', '');
+        e.dataTransfer.effectAllowed = 'move';
+    });
     // Recipient suggestions: while a field's list is open, the navigation keys drive the list
     // (handled in Blazor) instead of moving the caret, leaving the field or submitting.
     // This listener runs on the input itself, before the document-level shortcut handler.
@@ -252,6 +259,19 @@ window.nullifyApp = (() => {
         },
 
         confirm(message) { return window.confirm(message); },
+
+        /** Keep a context menu opened at (x, y) inside the window; focus it when it first opens. */
+        fitMenu(el, x, y, first) {
+            if (!el) return;
+            const pad = 8;
+            const w = el.offsetWidth, h = el.offsetHeight;
+            el.style.left = Math.max(pad, Math.min(x, window.innerWidth - w - pad)) + 'px';
+            el.style.top = Math.max(pad, Math.min(y, window.innerHeight - h - pad)) + 'px';
+            if (first) {
+                const item = el.querySelector('input, .menu-item');
+                if (item) item.focus({ preventScroll: true });
+            }
+        },
     };
 })();
 

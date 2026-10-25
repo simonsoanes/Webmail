@@ -206,11 +206,17 @@ public sealed partial class ImapSession : IAsyncDisposable
 
     // ------------------------------------------------------------------ folders
 
-    public async Task<IReadOnlyList<FolderEntry>> ListFoldersAsync()
+    public Task<IReadOnlyList<FolderEntry>> ListFoldersAsync() => ListAsync("LIST");
+
+    /// <summary>The folders the user is subscribed to (LSUB), by name.</summary>
+    public async Task<HashSet<string>> ListSubscribedAsync() =>
+        (await ListAsync("LSUB")).Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
+
+    private async Task<IReadOnlyList<FolderEntry>> ListAsync(string command)
     {
         var folders = new List<FolderEntry>();
-        var result = await RunAsync("LIST \"\" \"*\"");
-        if (result.Status != "OK") throw new ImapProtocolException("LIST failed: " + result.Text);
+        var result = await RunAsync($"{command} \"\" \"*\"");
+        if (result.Status != "OK") throw new ImapProtocolException($"{command} failed: " + result.Text);
 
         foreach (var line in result.Untagged)
         {
@@ -234,14 +240,17 @@ public sealed partial class ImapSession : IAsyncDisposable
         return folders;
     }
 
-    [GeneratedRegex(@"^\* LIST \((?<attrs>.*?)\) (?:""(?<qdelim>.)""|(?<delim>NIL|\S)) (?<name>.+)$")]
+    [GeneratedRegex(@"^\* (?:LIST|LSUB) \((?<attrs>.*?)\) (?:""(?<qdelim>.)""|(?<delim>NIL|\S)) (?<name>.+)$", RegexOptions.IgnoreCase)]
     private static partial Regex ListRx();
 
     public async Task<SelectResult> SelectFolderAsync(string folderName)
     {
         int total = 0, recent = 0, unseen = 0;
+        IReadOnlyList<string> defined = [], permanent = [];
         var result = await RunAsync($"SELECT \"{Mailbox(folderName)}\"", line =>
         {
+            if (line.StartsWith("* FLAGS (", StringComparison.OrdinalIgnoreCase)) defined = FlagList(line, "* FLAGS (");
+            if (line.Contains("[PERMANENTFLAGS (", StringComparison.OrdinalIgnoreCase)) permanent = FlagList(line, "[PERMANENTFLAGS (");
             var m = CountRx().Match(line);
             if (m.Success) total = int.Parse(m.Groups[1].Value);
             m = RecentRx().Match(line);
@@ -250,7 +259,21 @@ public sealed partial class ImapSession : IAsyncDisposable
             if (m.Success) unseen = int.Parse(m.Groups[1].Value);
         });
         if (result.Status != "OK") throw new ImapProtocolException($"SELECT {folderName} failed: {result.Status} {result.Text}");
-        return new SelectResult(total, recent, unseen);
+        // "\*" in PERMANENTFLAGS: the client may create new keywords (tags) here.
+        var keywords = defined.Concat(permanent).Where(f => !f.StartsWith('\\'))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return new SelectResult(total, recent, unseen, keywords, permanent.Contains("\\*"));
+    }
+
+    /// <summary>The space-separated flags inside the parentheses that follow <paramref name="marker"/>.</summary>
+    public static IReadOnlyList<string> FlagList(string line, string marker)
+    {
+        var start = line.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start < 0) return [];
+        start += marker.Length;
+        var end = line.IndexOf(')', start);
+        if (end < 0) return [];
+        return line[start..end].Split(' ', StringSplitOptions.RemoveEmptyEntries);
     }
 
     [GeneratedRegex(@"^\* (\d+) EXISTS", RegexOptions.IgnoreCase)]
@@ -290,6 +313,20 @@ public sealed partial class ImapSession : IAsyncDisposable
     {
         var r = await RunAsync($"RENAME \"{Mailbox(oldName)}\" \"{Mailbox(newName)}\"");
         if (r.Status != "OK") throw new ImapProtocolException($"RENAME failed: {r.Status} {r.Text}");
+    }
+
+    public async Task SubscribeAsync(string folderName, bool subscribe)
+    {
+        var command = subscribe ? "SUBSCRIBE" : "UNSUBSCRIBE";
+        var r = await RunAsync($"{command} \"{Mailbox(folderName)}\"");
+        if (r.Status != "OK") throw new ImapProtocolException($"{command} failed: {r.Status} {r.Text}");
+    }
+
+    /// <summary>Mark every message in the selected folder as read.</summary>
+    public async Task MarkAllSeenAsync()
+    {
+        var r = await RunAsync("STORE 1:* +FLAGS.SILENT (\\Seen)");
+        if (r.Status != "OK") throw new ImapProtocolException("STORE failed: " + r.Status + " " + r.Text);
     }
 
     // ------------------------------------------------------------------ messages
@@ -423,9 +460,13 @@ public sealed partial class ImapSession : IAsyncDisposable
     private static MessageEnvelope ParseEnvelope(Dictionary<string, string> f)
     {
         var flags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var keywords = new List<string>();
         if (f.TryGetValue("flags", out var raw))
             foreach (var flag in raw.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
                 flags.Add(flag.TrimStart('\\'));
+                if (!flag.StartsWith('\\')) keywords.Add(flag);
+            }
 
         long.TryParse(f.GetValueOrDefault("uid", "0"), out var uid);
         long.TryParse(f.GetValueOrDefault("size", "0"), out var size);
@@ -447,6 +488,7 @@ public sealed partial class ImapSession : IAsyncDisposable
             Cc = MimeText.Decode(f.GetValueOrDefault("Cc", "")),
             MessageId = f.GetValueOrDefault("Message-ID", ""),
             Flags = flags,
+            Keywords = keywords,
         };
     }
 
@@ -781,7 +823,10 @@ public sealed record CommandResult(string Status, string Text, IReadOnlyList<str
 
 public sealed record FolderEntry(string Name, HashSet<string> Attributes, string Delimiter);
 
-public sealed record SelectResult(int Total, int Recent, int Unseen);
+/// <param name="Keywords">Keywords (tags) the server lists for this folder.</param>
+/// <param name="CanCreateKeywords">The server accepts new keywords here (PERMANENTFLAGS includes "\*").</param>
+public sealed record SelectResult(int Total, int Recent, int Unseen,
+    IReadOnlyList<string>? Keywords = null, bool CanCreateKeywords = false);
 
 public sealed record MessageEnvelope
 {
@@ -800,6 +845,8 @@ public sealed record MessageEnvelope
     public string Cc { get; init; } = "";
     public string MessageId { get; init; } = "";
     public HashSet<string> Flags { get; init; } = new();
+    /// <summary>Non-system flags as stored (IMAP keywords: tags set by this or another client).</summary>
+    public IReadOnlyList<string> Keywords { get; init; } = [];
 }
 
 /// <summary>RFC 2047 encoded-word decoding and IMAP modified UTF-7 (RFC 3501 §5.1.3).</summary>

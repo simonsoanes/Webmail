@@ -103,7 +103,7 @@
     private bool dropsComments;
 
     private IReadOnlyList<string> folderNames =>
-        MailFormat.OrderFolders(State.Folders).Select(f => f.Name).ToList();
+        State.OrderedFolders().Select(f => f.Name).ToList();
 
     protected override async Task OnInitializedAsync() => await RefreshScripts();
 

@@ -1,0 +1,32 @@
+@inject IJSRuntime JS
+
+@* A right-click menu at the pointer. The page keeps it inside the window once it has a size. *@
+<div class="menu-backdrop" @onclick="Close" @oncontextmenu="Close" @oncontextmenu:preventDefault="true"></div>
+<div @ref="menu" class="menu context-menu" role="menu" style="left:@(X)px;top:@(Y)px;"
+     @oncontextmenu:preventDefault="true" @onkeydown="OnKey">
+    @ChildContent
+</div>
+
+@code {
+    [Parameter] public double X { get; set; }
+    [Parameter] public double Y { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private ElementReference menu;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // Every render: the content (and so the size) changes when a sub-list opens.
+        try { await JS.InvokeVoidAsync("nullifyApp.fitMenu", menu, X, Y, firstRender); }
+        catch (JSDisconnectedException) { }
+        catch (JSException) { /* the menu still works where it opened */ }
+    }
+
+    private Task Close() => OnClose.InvokeAsync();
+
+    private async Task OnKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") await Close();
+    }
+}

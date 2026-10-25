@@ -12,27 +12,73 @@ namespace Nullify.WebMail.Services;
 /// All methods take an explicit credential — no HttpContext dependency, so they work
 /// inside interactive circuits.
 /// </summary>
-public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsService settings, ILogger<MailService> logger)
+public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsService settings, IdentityService identities, ILogger<MailService> logger)
 {
     private static readonly string[] SpecialUses = ["Sent", "Drafts", "Trash", "Junk", "Archive"];
 
-    public Task<IReadOnlyList<FolderInfo>> GetFoldersAsync(CredentialInfo cred) =>
+    /// <summary>
+    /// The folders to show: the subscribed ones (and INBOX), with counts. A server where nothing
+    /// is subscribed shows everything, so a fresh account is never left with an empty list.
+    /// <paramref name="all"/> lists every folder with its subscription, without counts (for Settings).
+    /// </summary>
+    public Task<IReadOnlyList<FolderInfo>> GetFoldersAsync(CredentialInfo cred, bool all = false) =>
         WithSession<IReadOnlyList<FolderInfo>>(cred, async s =>
         {
             var folders = await s.ListFoldersAsync();
+            HashSet<string> subscribed;
+            try { subscribed = await s.ListSubscribedAsync(); }
+            catch (ImapProtocolException ex)
+            {
+                logger.LogDebug("LSUB failed: {Msg}", ex.Message);
+                subscribed = folders.Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
+            }
             var list = new List<FolderInfo>();
             foreach (var f in folders
                          .Where(f => !f.Attributes.Contains("Noselect", StringComparer.OrdinalIgnoreCase)
                                      && !f.Attributes.Contains("NonExistent", StringComparer.OrdinalIgnoreCase))
-                         .Take(200))
+                         .Take(all ? 1000 : 200))
             {
+                var isSubscribed = subscribed.Contains(f.Name);
+                var use = SpecialUseOf(f);
+                if (!all && !isSubscribed && use != "Inbox" && subscribed.Count > 0) continue;
                 int total = 0, unseen = 0;
-                try { (total, unseen) = await s.StatusAsync(f.Name); }
-                catch (Exception ex) { logger.LogDebug("STATUS {Folder} failed: {Msg}", f.Name, ex.Message); }
+                if (!all)
+                {
+                    try { (total, unseen) = await s.StatusAsync(f.Name); }
+                    catch (Exception ex) { logger.LogDebug("STATUS {Folder} failed: {Msg}", f.Name, ex.Message); }
+                }
                 list.Add(new FolderInfo(f.Name, string.Join(",", f.Attributes), total, unseen,
-                    f.Delimiter, SpecialUseOf(f)));
+                    f.Delimiter, use, isSubscribed));
             }
             return list;
+        });
+
+    /// <summary>
+    /// Show or hide a folder in the folder list by (un)subscribing it. With no subscriptions at
+    /// all every folder is shown, so hiding one first subscribes all the others.
+    /// </summary>
+    public Task SetFolderShownAsync(CredentialInfo cred, string folder, bool shown) =>
+        WithSession(cred, async s =>
+        {
+            var subscribed = await s.ListSubscribedAsync();
+            if (!shown && subscribed.Count == 0)
+            {
+                foreach (var f in await s.ListFoldersAsync())
+                    if (f.Name != folder && !f.Attributes.Contains("Noselect", StringComparer.OrdinalIgnoreCase)
+                        && !f.Attributes.Contains("NonExistent", StringComparer.OrdinalIgnoreCase))
+                        await s.SubscribeAsync(f.Name, true);
+                return true;
+            }
+            await s.SubscribeAsync(folder, shown);
+            return true;
+        });
+
+    public Task MarkAllSeenAsync(CredentialInfo cred, string folder) =>
+        WithSession(cred, async s =>
+        {
+            var sel = await s.SelectFolderAsync(folder);
+            if (sel.Total > 0) await s.MarkAllSeenAsync();
+            return true;
         });
 
     /// <summary>Special-use role (RFC 6154) from LIST attributes, falling back to common names.</summary>
@@ -60,12 +106,16 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsSe
         {
             var sel = await s.SelectFolderAsync(folder);
             var envs = await s.FetchEnvelopesAsync(sel.Total, page, pageSize);
-            return new MessagePage(envs.Where(e => e.Uid > 0).Select(ToSummary).ToList(), sel.Total, page, pageSize);
+            return new MessagePage(envs.Where(e => e.Uid > 0).Select(ToSummary).ToList(), sel.Total, page, pageSize,
+                sel.Keywords, sel.CanCreateKeywords);
         });
 
     private static MessageSummary ToSummary(MessageEnvelope e) => new(
         e.Uid, e.Subject, e.From, e.To, e.Date, e.Size,
-        e.IsSeen, e.IsFlagged, e.IsAnswered, e.IsDraft, e.MessageId, e.HasAttachments);
+        e.IsSeen, e.IsFlagged, e.IsAnswered, e.IsDraft, e.MessageId, e.HasAttachments)
+    {
+        Keywords = e.Keywords,
+    };
 
     public Task<MessageContent> GetMessageAsync(CredentialInfo cred, string folder, long uid) =>
         WithSession(cred, async s =>
@@ -182,14 +232,43 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsSe
             return true;
         });
 
+    // Subscriptions follow the folder: some servers leave them behind on RENAME and DELETE,
+    // and a new folder that isn't subscribed would not appear in the list.
     public Task CreateFolderAsync(CredentialInfo cred, string name) =>
-        WithSession(cred, async s => { await s.CreateFolderAsync(name); return true; });
+        WithSession(cred, async s =>
+        {
+            await s.CreateFolderAsync(name);
+            // With no subscriptions at all every folder is shown; subscribing just this one would hide the rest.
+            if ((await s.ListSubscribedAsync()).Count > 0) await TrySubscribe(s, name, true);
+            return true;
+        });
 
     public Task DeleteFolderAsync(CredentialInfo cred, string name) =>
-        WithSession(cred, async s => { await s.DeleteFolderAsync(name); return true; });
+        WithSession(cred, async s =>
+        {
+            await s.DeleteFolderAsync(name);
+            await TrySubscribe(s, name, false);
+            return true;
+        });
 
     public Task RenameFolderAsync(CredentialInfo cred, string oldName, string newName) =>
-        WithSession(cred, async s => { await s.RenameFolderAsync(oldName, newName); return true; });
+        WithSession(cred, async s =>
+        {
+            var wasSubscribed = (await s.ListSubscribedAsync()).Contains(oldName);
+            await s.RenameFolderAsync(oldName, newName);
+            if (wasSubscribed)
+            {
+                await TrySubscribe(s, oldName, false);
+                await TrySubscribe(s, newName, true);
+            }
+            return true;
+        });
+
+    private async Task TrySubscribe(ImapSession s, string name, bool subscribe)
+    {
+        try { await s.SubscribeAsync(name, subscribe); }
+        catch (ImapProtocolException ex) { logger.LogDebug("(UN)SUBSCRIBE {Folder} failed: {Msg}", name, ex.Message); }
+    }
 
     public Task<IReadOnlyList<MessageSummary>> SearchAsync(CredentialInfo cred, string folder, string query, int limit) =>
         WithSession<IReadOnlyList<MessageSummary>>(cred, async s =>
@@ -215,6 +294,7 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsSe
 
     public async Task SendAsync(CredentialInfo cred, SendRequest req, string? bodyEntity = null)
     {
+        req = req with { From = await identities.ResolveFromAsync(cred.Login, req.From) };
         var mime = BuildMimeMessage(req, cred.Login, bodyEntity);
         var recipients = req.To.Concat(req.Cc ?? []).Concat(req.Bcc ?? [])
             .Select(ExtractAddress).Where(a => a.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -241,14 +321,17 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsSe
     }
 
     /// <summary>Store a draft in the Drafts folder. Returns the folder used, or null if none exists.</summary>
-    public Task<string?> SaveDraftAsync(CredentialInfo cred, SendRequest req) =>
-        WithSession(cred, async s =>
+    public async Task<string?> SaveDraftAsync(CredentialInfo cred, SendRequest req)
+    {
+        req = req with { From = await identities.ResolveFromAsync(cred.Login, req.From) };
+        return await WithSession(cred, async s =>
         {
             var drafts = await FindSpecialFolderAsync(s, "Drafts");
             if (drafts == null) return null;
             await s.AppendMessageAsync(drafts, BuildMimeMessage(req, cred.Login), "\\Seen \\Draft");
             return drafts;
         });
+    }
 
     private static async Task<string?> FindSpecialFolderAsync(ImapSession session, string use)
     {

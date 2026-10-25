@@ -18,7 +18,8 @@ public class ApiService(
     IDbContextFactory<AppDbContext> dbFactory,
     ManageSieveClient sieve,
     WriteGate gate,
-    BrandingCache brandingCache)
+    BrandingCache brandingCache,
+    IdentityService identities)
 {
     private CredentialInfo Cred =>
         session.Credential ?? throw new InvalidOperationException("Not authenticated.");
@@ -41,6 +42,14 @@ public class ApiService(
     // ---- Mail ----
 
     public Task<IReadOnlyList<FolderInfo>> GetFoldersAsync() => mail.GetFoldersAsync(Cred);
+
+    /// <summary>Every folder on the server with its subscription, without message counts.</summary>
+    public Task<IReadOnlyList<FolderInfo>> GetAllFoldersAsync() => mail.GetFoldersAsync(Cred, all: true);
+
+    /// <summary>Show or hide a folder in the folder list (IMAP subscription).</summary>
+    public Task SetFolderShownAsync(string name, bool shown) => mail.SetFolderShownAsync(Cred, name, shown);
+
+    public Task MarkAllReadAsync(string folderName) => mail.MarkAllSeenAsync(Cred, folderName);
 
     public async Task<MessagePage?> GetMessagesAsync(string folderName, int page = 0, int pageSize = 50) =>
         await mail.GetMessagesAsync(Cred, folderName, page, pageSize);
@@ -82,6 +91,26 @@ public class ApiService(
     public Task DeleteFolderAsync(string name) => mail.DeleteFolderAsync(Cred, name);
 
     public Task RenameFolderAsync(string oldName, string newName) => mail.RenameFolderAsync(Cred, oldName, newName);
+
+    // ---- Identity ----
+
+    public Task<IdentitySettingsDto> GetIdentityAsync() => identities.GetAsync(Cred.Login);
+
+    public Task<IReadOnlyList<SenderIdentity>> GetSendersAsync() => identities.SendersAsync(Cred.Login);
+
+    public Task SetDisplayNameAsync(string? name) => identities.SetDisplayNameAsync(Cred.Login, name);
+
+    public Task SaveAliasAsync(string name, string email) => identities.SaveAliasAsync(Cred.Login, name, email);
+
+    public Task RemoveAliasAsync(string email) => identities.RemoveAliasAsync(Cred.Login, email);
+
+    public Task<bool> DomainAllowsAliasesAsync(string domain) => identities.DomainAllowsAliasesAsync(domain);
+
+    public Task SetDomainAllowsAliasesAsync(string domain, bool allowed)
+    {
+        if (!session.IsAdmin) throw new UnauthorizedAccessException("Only administrators can change domain settings.");
+        return identities.SetDomainAllowsAliasesAsync(domain, allowed);
+    }
 
     // ---- Preferences ----
 
@@ -341,6 +370,27 @@ public class AppState
     // Cached compose preferences.
     public string Signature { get; set; } = "";
     public string ComposeFont { get; set; } = "sans-serif";
+
+    /// <summary>Addresses the user can send as; the sign-in address first.</summary>
+    public IReadOnlyList<SenderIdentity> Senders { get; set; } = Array.Empty<SenderIdentity>();
+
+    /// <summary>The user's arrangement of folders (from dragging), saved as a preference.</summary>
+    public IReadOnlyList<string> FolderOrder { get; set; } = Array.Empty<string>();
+    public const string FolderOrderKey = "folders.order";
+
+    public List<FolderInfo> OrderedFolders() => MailFormat.OrderFolders(Folders, FolderOrder);
+
+    /// <summary>A folder being dragged in the folder list (to re-order it).</summary>
+    public string? DraggingFolder { get; set; }
+
+    /// <summary>Tags (IMAP keywords) the server lists for the open folder, plus any seen on messages.</summary>
+    public IReadOnlyList<string> FolderTags { get; set; } = Array.Empty<string>();
+
+    /// <summary>The open folder accepts new tags (and so supports tagging at all).</summary>
+    public bool CanCreateTags { get; set; }
+
+    /// <summary>Tagging is possible here: the folder has tags or accepts new ones.</summary>
+    public bool TagsSupported => CanCreateTags || FolderTags.Count > 0;
 
     /// <summary>Bump to force the message list to refetch (e.g. after delete/move).</summary>
     public int ListVersion { get; set; }

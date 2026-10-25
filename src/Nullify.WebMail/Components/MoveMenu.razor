@@ -10,7 +10,7 @@
         <div class="menu-backdrop" @onclick="() => open = false"></div>
         <div class="menu @(AlignLeft ? "left" : "")" role="menu">
             <div class="menu-title">Move to</div>
-            @foreach (var f in MailFormat.OrderFolders(State.Folders).Where(f => f.Name != State.SelectedFolder))
+            @foreach (var f in State.OrderedFolders().Where(f => f.Name != State.SelectedFolder))
             {
                 var folder = f;
                 <button class="menu-item" role="menuitem" @onclick="() => Pick(folder.Name)"

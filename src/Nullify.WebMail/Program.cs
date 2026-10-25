@@ -59,6 +59,7 @@ builder.Services.AddSingleton<ImapClient>();
 builder.Services.AddSingleton<SmtpClient>();
 builder.Services.AddSingleton<ManageSieveClient>();
 builder.Services.AddSingleton<ConnectionPool>();
+builder.Services.AddSingleton<IdentityService>();
 builder.Services.AddSingleton<MailService>();
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<TrustedDeviceService>();

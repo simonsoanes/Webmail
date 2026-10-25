@@ -168,17 +168,77 @@ public static partial class MailFormat
         _ => "folder",
     };
 
-    /// <summary>Special folders first in a conventional order, then the rest as a tree, alphabetically.</summary>
-    public static List<FolderInfo> OrderFolders(IEnumerable<FolderInfo> folders)
+    /// <summary>
+    /// The folders as a tree. Siblings the user has arranged (<paramref name="customOrder"/>, from
+    /// dragging) keep that order; the rest follow, special folders first in a conventional order,
+    /// then alphabetically.
+    /// </summary>
+    public static List<FolderInfo> OrderFolders(IEnumerable<FolderInfo> folders, IReadOnlyList<string>? customOrder = null)
     {
         string[] order = ["Inbox", "Drafts", "Sent", "Archive", "Junk", "Trash"];
         var all = folders.ToList();
-        var special = all.Where(f => f.SpecialUse != null && FolderDepth(f) == 0)
-            .OrderBy(f => Array.IndexOf(order, f.SpecialUse)).ToList();
-        var rest = all.Except(special)
-            .OrderBy(f => f.Name.Replace(f.Delimiter ?? "\u0000", "\u0001"), StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        return special.Concat(rest).ToList();
+        var names = all.Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
+        var custom = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var i = 0; i < (customOrder?.Count ?? 0); i++) custom.TryAdd(customOrder![i], i);
+        var byParent = all.GroupBy(f => ParentOf(f, names)).ToDictionary(g => g.Key, g => g.ToList());
+
+        var result = new List<FolderInfo>(all.Count);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        void Walk(string parent)
+        {
+            if (!byParent.TryGetValue(parent, out var children)) return;
+            foreach (var f in children
+                         .OrderBy(f => custom.TryGetValue(f.Name, out var i) ? i : int.MaxValue)
+                         .ThenBy(f => f.SpecialUse != null && FolderDepth(f) == 0 && Array.IndexOf(order, f.SpecialUse) is >= 0 and var i ? i : order.Length)
+                         .ThenBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                if (!seen.Add(f.Name)) continue;
+                result.Add(f);
+                Walk(f.Name);
+            }
+        }
+        Walk("");
+        return result;
+    }
+
+    /// <summary>
+    /// The folder this one is shown under: its nearest listed ancestor, or "" at the top level
+    /// (which includes INBOX's children on servers that put every folder under INBOX).
+    /// </summary>
+    public static string ParentOf(FolderInfo f, IReadOnlySet<string> names)
+    {
+        if (string.IsNullOrEmpty(f.Delimiter) || FolderDepth(f) == 0) return "";
+        var name = f.Name;
+        for (var cut = name.LastIndexOf(f.Delimiter[0]); cut > 0; cut = name.LastIndexOf(f.Delimiter[0]))
+        {
+            name = name[..cut];
+            if (name.Equals("INBOX", StringComparison.OrdinalIgnoreCase)) break;
+            if (names.Contains(name)) return name;
+        }
+        return "";
+    }
+
+    /// <summary>
+    /// The custom order after dropping <paramref name="dragged"/> next to <paramref name="target"/>
+    /// (after it when <paramref name="after"/>), or null when they aren't siblings.
+    /// </summary>
+    public static List<string>? MoveFolder(IReadOnlyList<FolderInfo> folders, IReadOnlyList<string> customOrder,
+        string dragged, string target, bool after)
+    {
+        if (dragged == target) return null;
+        var names = folders.Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
+        var d = folders.FirstOrDefault(f => f.Name == dragged);
+        var t = folders.FirstOrDefault(f => f.Name == target);
+        if (d == null || t == null) return null;
+        var parent = ParentOf(d, names);
+        if (ParentOf(t, names) != parent) return null;
+
+        var siblings = OrderFolders(folders, customOrder)
+            .Where(f => ParentOf(f, names) == parent).Select(f => f.Name).ToList();
+        siblings.Remove(dragged);
+        siblings.Insert(siblings.IndexOf(target) + (after ? 1 : 0), dragged);
+        // Only the names of folders that still exist are kept.
+        return customOrder.Where(n => names.Contains(n) && !siblings.Contains(n)).Concat(siblings).ToList();
     }
 
     // ------------------------------------------------------------------ bodies

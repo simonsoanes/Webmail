@@ -92,7 +92,8 @@ public class MailController(AuthService auth, MailService mail) : ControllerBase
     {
         if (Cred is not { } cred) return Unauthorized();
         if (req.To == null || req.To.Count == 0) return BadRequest("No recipients.");
-        await mail.SendAsync(cred, req);
+        try { await mail.SendAsync(cred, req); }
+        catch (UnauthorizedAccessException ex) { return StatusCode(StatusCodes.Status403Forbidden, ex.Message); }
         return Ok();
     }
 

@@ -145,9 +145,16 @@
             {
                 if (p.Key == "compose.signature") State.Signature = p.Value ?? "";
                 if (p.Key == "compose.font") State.ComposeFont = p.Value ?? "sans-serif";
+                if (p.Key == AppState.FolderOrderKey && !string.IsNullOrEmpty(p.Value))
+                {
+                    try { State.FolderOrder = System.Text.Json.JsonSerializer.Deserialize<List<string>>(p.Value) ?? []; }
+                    catch (System.Text.Json.JsonException) { /* default order */ }
+                }
             }
         }
         catch { /* defaults */ }
+        try { State.Senders = await Api.GetSendersAsync(); }
+        catch { /* compose falls back to the sign-in address */ }
         try { State.DocumentsAvailable = await Documents.IsAvailableAsync(); }
         catch { /* menu stays hidden */ }
         try { State.BrandTitle = await Branding.TitleAsync(); }

@@ -22,8 +22,20 @@
     {
         <div class="compose-fields">
             <div class="compose-field">
-                <label>From</label>
-                <span class="from-value">@from</span>
+                <label for="compose-from">From</label>
+                @if (State.Senders.Count > 1)
+                {
+                    <select id="compose-from" class="from-select" value="@MailFormat.ParseAddress(from).Email" @onchange="PickSender">
+                        @foreach (var s in State.Senders)
+                        {
+                            <option value="@s.Email">@s.ToString()</option>
+                        }
+                    </select>
+                }
+                else
+                {
+                    <span class="from-value">@from</span>
+                }
             </div>
             <div class="compose-field">
                 <label for="compose-to">To</label>
@@ -239,7 +251,7 @@
     protected override async Task OnInitializedAsync()
     {
         State.SendHandler = Send;
-        from = State.Session?.Email ?? State.Session?.Username ?? "";
+        from = State.Senders.Count > 0 ? State.Senders[0].ToString() : State.Session?.Email ?? State.Session?.Username ?? "";
         var signature = string.IsNullOrWhiteSpace(State.Signature) ? "" : "\n\n-- \n" + State.Signature.TrimEnd();
 
         if (State.ComposeMode != ComposeMode.New && State.ComposeSourceFolder != null && State.ComposeSourceUid is { } uid)
@@ -302,16 +314,24 @@
             return;
         }
 
+        // Answer from the alias the message was sent to.
+        var addressed = MailFormat.ParseAddressList(H("To")).Concat(MailFormat.ParseAddressList(H("Cc")))
+            .Select(a => a.Email).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (State.Senders.Skip(1).FirstOrDefault(s => addressed.Contains(s.Email)) is { } alias
+            && !State.Senders.Take(1).Any(s => addressed.Contains(s.Email)))
+            from = alias.ToString();
+
         subject = HasPrefix(origSubject, "re:") ? origSubject : "Re: " + origSubject;
         var replyTo = H("Reply-To");
         to = replyTo.Length > 0 ? replyTo : H("From");
 
         if (State.ComposeMode == ComposeMode.ReplyAll)
         {
-            var me = MailFormat.ParseAddress(from).Email;
+            var mine = State.Senders.Select(s => s.Email).Append(MailFormat.ParseAddress(from).Email)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
             var primary = MailFormat.ParseAddressList(to).Select(a => a.Email).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var others = MailFormat.ParseAddressList(H("To")).Concat(MailFormat.ParseAddressList(H("Cc")))
-                .Where(a => !a.Email.Equals(me, StringComparison.OrdinalIgnoreCase) && !primary.Contains(a.Email))
+                .Where(a => !mine.Contains(a.Email) && !primary.Contains(a.Email))
                 .DistinctBy(a => a.Email.ToLowerInvariant())
                 .Select(a => a.ToString()).ToList();
             if (others.Count > 0)
@@ -362,6 +382,11 @@
         {
             // Suggestions are a convenience; typing addresses still works.
         }
+    }
+
+    private void PickSender(ChangeEventArgs e)
+    {
+        if (State.Senders.FirstOrDefault(s => s.Email == e.Value as string) is { } sender) from = sender.ToString();
     }
 
     private static bool HasPrefix(string s, params string[] prefixes) =>

@@ -35,6 +35,48 @@ public sealed class MailActions(ApiService api, AppState state)
             "Could not update read state");
     }
 
+    /// <summary>Add or remove a tag (IMAP keyword) on messages.</summary>
+    public async Task SetTagAsync(IReadOnlyCollection<long> uids, string keyword, bool on)
+    {
+        if (Folder == null || uids.Count == 0 || !MailTags.IsValidKeyword(keyword)) return;
+        foreach (var uid in uids)
+            Update(uid, m => m with
+            {
+                Keywords = on
+                    ? m.Keywords.Append(keyword).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+                    : m.Keywords.Where(k => !k.Equals(keyword, StringComparison.OrdinalIgnoreCase)).ToList(),
+            });
+        if (on && !state.FolderTags.Contains(keyword, StringComparer.OrdinalIgnoreCase))
+            state.FolderTags = state.FolderTags.Append(keyword).ToList();
+        var label = MailTags.Label(keyword);
+        await Run(() => api.SetFlagsAsync(Folder, uids, on ? keyword : null, on ? null : keyword),
+            uids.Count > 1 ? (on ? $"Tagged {uids.Count} messages \"{label}\"" : $"Removed \"{label}\" from {uids.Count} messages") : null,
+            "Could not update tags");
+    }
+
+    /// <summary>Remove every tag from messages.</summary>
+    public async Task ClearTagsAsync(IReadOnlyCollection<long> uids)
+    {
+        if (Folder == null || uids.Count == 0) return;
+        var tags = state.CurrentMessages.Where(m => uids.Contains(m.Uid))
+            .SelectMany(m => MailTags.Tags(m.Keywords)).Where(MailTags.IsValidKeyword)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (tags.Count == 0) return;
+        foreach (var uid in uids) Update(uid, m => m with { Keywords = m.Keywords.Where(k => !MailTags.IsTag(k)).ToList() });
+        await Run(() => api.SetFlagsAsync(Folder, uids, null, string.Join(' ', tags)), null, "Could not remove tags");
+    }
+
+    public async Task MarkFolderReadAsync(string folder)
+    {
+        if (folder == Folder)
+            state.CurrentMessages = state.CurrentMessages.Select(m => m.IsSeen ? m : m with { IsSeen = true }).ToList();
+        state.Folders = state.Folders.Select(f => f.Name == folder ? f with { UnreadMessages = 0 } : f).ToList();
+        state.NotifyStateChanged();
+        var label = state.Folders.FirstOrDefault(f => f.Name == folder) is { } f ? MailFormat.FolderLeaf(f) : folder;
+        await Run(() => api.MarkAllReadAsync(folder), $"Marked everything in {label} as read", "Could not mark the folder as read");
+        Refresh();
+    }
+
     /// <summary>Local-only: the server marks a message seen when its body is fetched.</summary>
     public void MarkSeenLocally(long uid)
     {
@@ -90,6 +132,25 @@ public sealed class MailActions(ApiService api, AppState state)
             return Task.CompletedTask;
         }
         return MoveAsync(uids, archive.Name);
+    }
+
+    public Task JunkAsync(IReadOnlyCollection<long> uids)
+    {
+        var junk = state.FindSpecialFolder("Junk");
+        if (junk == null)
+        {
+            state.ShowToast("No Junk folder on this server.", isError: true);
+            return Task.CompletedTask;
+        }
+        return MoveAsync(uids, junk.Name);
+    }
+
+    public async Task SetFlaggedAsync(IReadOnlyCollection<long> uids, bool flagged)
+    {
+        if (Folder == null || uids.Count == 0) return;
+        foreach (var uid in uids) Update(uid, m => m with { IsFlagged = flagged });
+        await Run(() => api.SetFlagsAsync(Folder, uids, flagged ? "\\Flagged" : null, flagged ? null : "\\Flagged"),
+            null, "Could not update the star");
     }
 
     /// <summary>Select the next (or previous) message relative to the open one.</summary>
