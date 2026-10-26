@@ -465,15 +465,24 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsSe
 
     private static void AppendBody(StringBuilder sb, SendRequest req)
     {
-        if (!string.IsNullOrEmpty(req.HtmlBody))
+        if (!string.IsNullOrEmpty(req.HtmlBody) || req.Calendar != null)
         {
             var boundary = $"----=_Alt_{Guid.NewGuid():N}";
             sb.Append("Content-Type: multipart/alternative; boundary=\"").Append(boundary).AppendLine("\"");
             sb.AppendLine();
             sb.Append("--").AppendLine(boundary);
             AppendTextPart(sb, "text/plain", req.TextBody ?? "");
-            sb.Append("--").AppendLine(boundary);
-            AppendTextPart(sb, "text/html", req.HtmlBody);
+            if (!string.IsNullOrEmpty(req.HtmlBody))
+            {
+                sb.Append("--").AppendLine(boundary);
+                AppendTextPart(sb, "text/html", req.HtmlBody);
+            }
+            if (req.Calendar is { } cal)
+            {
+                // Last, as the richest alternative: mail apps that understand it show an invitation.
+                sb.Append("--").AppendLine(boundary);
+                AppendTextPart(sb, $"text/calendar; method={cal.Method}", cal.Ics);
+            }
             sb.Append("--").Append(boundary).AppendLine("--");
         }
         else

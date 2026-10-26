@@ -8,7 +8,8 @@ namespace Nullify.WebMail.Services;
 
 /// <summary>
 /// Writes VEVENTs (RFC 5545). Updates rewrite only the properties the editor owns and keep
-/// everything else (alarms, attendees, categories, X- properties) as the server stored it.
+/// everything else (alarms, categories, X- properties) as the server stored it. The guest
+/// list is rewritten only when the edit carries one.
 /// </summary>
 public static partial class ICalendarWriter
 {
@@ -29,6 +30,7 @@ public static partial class ICalendarWriter
         lines.Add("UID:" + uid);
         lines.Add("CREATED:" + UtcStamp());
         lines.AddRange(EventProperties(edit, times, rrule, sequence: 0));
+        if (edit.Attendees != null) lines.AddRange(People(edit, [], reset: false));
         lines.Add("END:VEVENT");
         lines.Add("END:VCALENDAR");
         return Serialize(lines);
@@ -38,6 +40,8 @@ public static partial class ICalendarWriter
     /// Rewrite the series master (the VEVENT without RECURRENCE-ID). With
     /// <paramref name="dropExceptions"/>, EXDATEs and per-occurrence overrides are removed too —
     /// needed when the series' times or pattern change, since they'd no longer line up.
+    /// When the edit has a guest list it replaces the one in every remaining component; guests
+    /// who were already invited keep their answer unless the times or pattern changed.
     /// </summary>
     public static string UpdateMaster(string existing, EventEdit edit, EventTimes times, string? rrule, bool dropExceptions)
     {
@@ -47,25 +51,42 @@ public static partial class ICalendarWriter
         if (master == null) throw new InvalidOperationException("The event has no editable component.");
 
         var sequence = 0;
+        var people = new Dictionary<EventBlock, List<string>>(); // each component's ORGANIZER/ATTENDEE lines
         var output = new List<string>();
         for (var i = 0; i < lines.Count; i++)
         {
             var ev = events.FirstOrDefault(e => i >= e.Begin && i <= e.End);
             if (ev != null && ev.IsOverride && dropExceptions) { i = ev.End; continue; }
-            if (ev == master && i > master.Begin && i < master.End && master.Depth(i) == 0)
+            if (ev != null && i > ev.Begin && i < ev.End && ev.Depth(i) == 0)
             {
                 var name = PropertyName(lines[i]);
-                if (name == "SEQUENCE" && int.TryParse(lines[i][(lines[i].IndexOf(':') + 1)..], out var seq)) sequence = seq + 1;
-                if (Managed.Contains(name) || (dropExceptions && name is "EXDATE" or "RDATE")) continue;
+                if (edit.Attendees != null && name is "ATTENDEE" or "ORGANIZER")
+                {
+                    (people.TryGetValue(ev, out var list) ? list : people[ev] = []).Add(lines[i]);
+                    continue;
+                }
+                if (ev == master)
+                {
+                    if (name == "SEQUENCE" && int.TryParse(lines[i][(lines[i].IndexOf(':') + 1)..], out var seq)) sequence = seq + 1;
+                    if (Managed.Contains(name) || (dropExceptions && name is "EXDATE" or "RDATE")) continue;
+                }
             }
             output.Add(lines[i]);
-            if (i == master.Begin) output.AddRange(["\u0000PROPS"]); // placeholder, filled below
+            if (ev != null && i == ev.Begin) output.Add(Placeholder(ev)); // filled below
         }
 
         var props = EventProperties(edit, times, rrule, Math.Max(sequence, 1)).ToList();
-        var at = output.IndexOf("\u0000PROPS");
-        output.RemoveAt(at);
-        output.InsertRange(at, props);
+        // Moving the meeting or changing how it repeats asks everyone to answer again (RFC 5546 2.1.4).
+        var rescheduled = Timing(existing) != Timing(Serialize(["BEGIN:VCALENDAR", "BEGIN:VEVENT", .. props, "END:VEVENT", "END:VCALENDAR"]));
+        foreach (var ev in events)
+        {
+            var at = output.IndexOf(Placeholder(ev));
+            if (at < 0) continue;
+            output.RemoveAt(at);
+            List<string> insert = edit.Attendees == null ? [] : People(edit, people.GetValueOrDefault(ev) ?? [], rescheduled).ToList();
+            if (ev == master) insert.InsertRange(0, props);
+            output.InsertRange(at, insert);
+        }
 
         if (!times.AllDay) EnsureVTimezone(output, times.Zone, times.StartLocal.Year);
         return Serialize(output);
@@ -103,6 +124,65 @@ public static partial class ICalendarWriter
                     : $"EXDATE:{occurrence.UtcDateTime:yyyyMMdd'T'HHmmss'Z'}");
         }
         return Serialize(output);
+    }
+
+    /// <summary>When the main component happens: what guests answered to.</summary>
+    private static (DateTimeOffset, DateTimeOffset, string?)? Timing(string ics) =>
+        ICalendar.ParseEvents(ics, TimeZoneInfo.Utc).FirstOrDefault(e => e.RecurrenceIdWall == null) is { } m
+            ? (m.Start, m.End, m.RRule?.ToUpperInvariant()) : null;
+
+    private static string Placeholder(EventBlock ev) => "\u0000" + ev.Begin.ToString(CultureInfo.InvariantCulture);
+
+    // ------------------------------------------------------------------ people
+
+    /// <summary>
+    /// ORGANIZER and ATTENDEE lines for the edit's guest list (none when it's empty). Guests
+    /// already in <paramref name="existing"/> keep their parameters (answer, delegation...);
+    /// <paramref name="reset"/> asks every guest to answer again. SCHEDULE-AGENT=CLIENT tells a
+    /// scheduling CalDAV server (RFC 6638) that we send the invitations, so guests don't get two.
+    /// </summary>
+    private static IEnumerable<string> People(EventEdit edit, List<string> existing, bool reset)
+    {
+        if (edit.Attendees is not { Count: > 0 } guests) yield break;
+        var known = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        string? organizer = null;
+        foreach (var line in existing)
+        {
+            var (name, parameters, value) = ICalendar.SplitProperty(line);
+            if (name.Equals("ORGANIZER", StringComparison.OrdinalIgnoreCase)) organizer ??= line;
+            else known.TryAdd(ICalendar.AddressOf(value), parameters);
+        }
+        if (organizer != null) yield return organizer;
+        else if (edit.Organizer is { } me)
+            yield return "ORGANIZER" + Param("CN", me.Name) + ":mailto:" + me.Email.Trim();
+
+        foreach (var g in guests.DistinctBy(g => g.Email.Trim(), StringComparer.OrdinalIgnoreCase))
+        {
+            var old = known.GetValueOrDefault(g.Email.Trim());
+            var p = old == null ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) : new(old, StringComparer.OrdinalIgnoreCase);
+            var cn = string.IsNullOrWhiteSpace(g.Name) ? p.GetValueOrDefault("CN") : g.Name;
+            p.Remove("CN");
+            p["ROLE"] = g.Optional ? "OPT-PARTICIPANT" : "REQ-PARTICIPANT";
+            if (old == null || reset)
+            {
+                p["PARTSTAT"] = "NEEDS-ACTION";
+                p["RSVP"] = "TRUE";
+            }
+            p["SCHEDULE-AGENT"] = "CLIENT";
+            p.Remove("SCHEDULE-STATUS"); // the server's report on its own delivery
+            yield return "ATTENDEE" + Param("CN", cn) + string.Concat(p.Select(kv => Param(kv.Key.ToUpperInvariant(), kv.Value)))
+                         + ":mailto:" + g.Email.Trim();
+        }
+    }
+
+    /// <summary>";NAME=value", quoted when the value has ':', ';' or ','; nothing for an empty value.</summary>
+    internal static string Param(string name, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "";
+        // A quoted list ("a","b") reads back without its outer quotes only.
+        if (value.Contains("\",\"")) return $";{name}=\"{value}\"";
+        value = value.Replace("\"", "").Replace("\r", "").Replace("\n", " ").Trim();
+        return value.IndexOfAny([':', ';', ',']) >= 0 ? $";{name}=\"{value}\"" : $";{name}={value}";
     }
 
     // ------------------------------------------------------------------ pieces
@@ -245,22 +325,22 @@ public static partial class ICalendarWriter
 
     private static string Offset(TimeSpan o) => (o < TimeSpan.Zero ? "-" : "+") + o.Duration().ToString("hhmm", CultureInfo.InvariantCulture);
 
-    private static string UtcStamp() => DateTime.UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
+    internal static string UtcStamp() => DateTime.UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
 
-    private static string Escape(string s) =>
+    internal static string Escape(string s) =>
         s.Replace("\\", "\\\\").Replace(";", "\\;").Replace(",", "\\,").Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\\n");
 
-    private static string Serialize(IEnumerable<string> lines) => string.Concat(lines.Select(l => VCard.Fold(l) + "\r\n"));
+    internal static string Serialize(IEnumerable<string> lines) => string.Concat(lines.Select(l => VCard.Fold(l) + "\r\n"));
 
     // ------------------------------------------------------------------ structure
 
-    private sealed record EventBlock(int Begin, int End, bool IsOverride, int[] NestedDepth)
+    internal sealed record EventBlock(int Begin, int End, bool IsOverride, int[] NestedDepth)
     {
         /// <summary>Nesting depth inside this VEVENT (VALARM etc.) at line <paramref name="i"/>.</summary>
         public int Depth(int i) => NestedDepth[i - Begin];
     }
 
-    private static List<EventBlock> FindEvents(List<string> lines)
+    internal static List<EventBlock> FindEvents(List<string> lines)
     {
         var result = new List<EventBlock>();
         for (var i = 0; i < lines.Count; i++)
@@ -292,7 +372,7 @@ public static partial class ICalendarWriter
         return ev?.RecurrenceIdWall is { } r ? ev.ToOffset(r) : null;
     }
 
-    private static string PropertyName(string line)
+    internal static string PropertyName(string line)
     {
         var end = line.IndexOfAny([':', ';']);
         return (end < 0 ? line : line[..end]).ToUpperInvariant();

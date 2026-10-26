@@ -299,6 +299,8 @@ public sealed partial class CalDavAccountService(
                     ETag = string.IsNullOrWhiteSpace(etag) ? null : etag,
                     IsRecurring = e.IsRecurring,
                     OccurrenceId = e.OccurrenceId,
+                    Organizer = e.Organizer,
+                    Attendees = e.Attendees,
                 });
         }).ToList();
     }

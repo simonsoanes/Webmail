@@ -83,6 +83,23 @@ public class ApiService(
 
     public Task SendAsync(SendRequest request, string? bodyEntity = null) => mail.SendAsync(Cred, request, bodyEntity);
 
+    /// <summary>
+    /// Email meeting invitations, updates, cancellations and replies (iMIP): a text summary
+    /// with the iTIP object as a text/calendar alternative and as an invite.ics attachment.
+    /// </summary>
+    public async Task SendSchedulingAsync(IEnumerable<SchedulingMessage> messages, TimeZoneInfo zone)
+    {
+        foreach (var m in messages)
+        {
+            var (subject, text) = Scheduling.Describe(m, zone);
+            var to = m.Recipients.Select(r => new MailFormat.Address(r.Name ?? "", r.Email).ToString()).ToList();
+            await mail.SendAsync(Cred, new SendRequest(m.Sender.Email, to, null, null, subject, text, null, null,
+                PgpSign: false, PgpEncrypt: false, PgpKeyId: null,
+                Attachments: [new OutgoingAttachment("invite.ics", $"application/ics; method={m.Method}", System.Text.Encoding.UTF8.GetBytes(m.Ics))],
+                Calendar: new CalendarPart(m.Method, m.Ics)));
+        }
+    }
+
     public Task<IReadOnlyList<MessageSummary>> SearchAsync(string folderName, string query, int limit = 50) =>
         mail.SearchAsync(Cred, folderName, query, limit);
 

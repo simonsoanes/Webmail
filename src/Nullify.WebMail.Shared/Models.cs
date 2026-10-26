@@ -65,7 +65,11 @@ public sealed record SendRequest(
     string Subject, string TextBody, string? HtmlBody, IReadOnlyList<string>? AttachmentIds,
     bool PgpSign, bool PgpEncrypt, string? PgpKeyId,
     string? InReplyTo = null, string? References = null,
-    IReadOnlyList<OutgoingAttachment>? Attachments = null);
+    IReadOnlyList<OutgoingAttachment>? Attachments = null,
+    CalendarPart? Calendar = null);
+
+/// <summary>An iTIP object sent as a text/calendar alternative to the body (iMIP, RFC 6047).</summary>
+public sealed record CalendarPart(string Method, string Ics);
 
 public sealed record FolderOperation(string FolderName);
 
@@ -123,15 +127,30 @@ public sealed record CalendarEvent(
     public bool IsRecurring { get; init; }
     /// <summary>The occurrence's original start (its RECURRENCE-ID), used to skip just this one.</summary>
     public DateTimeOffset? OccurrenceId { get; init; }
+    /// <summary>Who sent the invitation; null for an event that isn't a meeting.</summary>
+    public EventAttendee? Organizer { get; init; }
+    public IReadOnlyList<EventAttendee> Attendees { get; init; } = [];
+}
+
+/// <summary>An attendee's answer (RFC 5545 PARTSTAT).</summary>
+public enum AttendeeStatus { NeedsAction, Accepted, Tentative, Declined, Delegated }
+
+/// <summary>A meeting participant. <see cref="Optional"/> is ROLE=OPT-PARTICIPANT.</summary>
+public sealed record EventAttendee(string Email, string? Name = null, AttendeeStatus Status = AttendeeStatus.NeedsAction, bool Optional = false)
+{
+    public string Display => string.IsNullOrWhiteSpace(Name) ? Email : Name;
 }
 
 /// <summary>Repeat choices offered by the editor (a subset of RRULE).</summary>
 public enum EventRepeat { None, Daily, Weekly, Monthly, Yearly }
 
 /// <summary>The editable fields of an event. For all-day events End is the last day (inclusive).</summary>
+/// <param name="Attendees">The guest list to write, or null to keep the server's as it is.</param>
+/// <param name="Organizer">Who invites the guests (one of the user's addresses); used when there are attendees.</param>
 public sealed record EventEdit(
     string Summary, string? Location, string? Description, bool AllDay,
-    DateTime StartLocal, DateTime EndLocal, EventRepeat Repeat);
+    DateTime StartLocal, DateTime EndLocal, EventRepeat Repeat,
+    IReadOnlyList<EventAttendee>? Attendees = null, SenderIdentity? Organizer = null);
 
 /// <summary>A calendar collection on the CalDAV server.</summary>
 public sealed record CalendarInfo(string Id, string Name, string? Color);

@@ -161,6 +161,31 @@
                         {
                             <div class="agenda-detail">
                                 <div class="muted">@CalendarName(item.CalendarId) · @FullRange(item)</div>
+                                @if (item.Organizer is { } org && item.Attendees.Count > 0)
+                                {
+                                    <div class="agenda-guests">
+                                        <div class="muted">Organised by @(IsMine(org.Email) ? "you" : org.Display) · @GuestSummary(item)</div>
+                                        <ul class="guest-list compact" aria-label="Guests">
+                                            @foreach (var g in item.Attendees)
+                                            {
+                                                <li><GuestStatus Status="g.Status" /><span class="guest-name" title="@g.Email">@g.Display@(IsMine(g.Email) ? " (you)" : "")</span>
+                                                    @if (g.Optional) { <span class="muted">Optional</span> }</li>
+                                            }
+                                        </ul>
+                                    </div>
+                                    @if (!IsMine(org.Email) && item.Attendees.FirstOrDefault(a => IsMine(a.Email)) is { } me && item.Href != null)
+                                    {
+                                        <div class="rsvp" role="group" aria-label="Your answer">
+                                            <span>Going?</span>
+                                            @foreach (var (answer, label) in Answers)
+                                            {
+                                                var choice = answer;
+                                                <button class="btn small @(me.Status == choice ? "accent" : "")" aria-pressed="@(me.Status == choice)"
+                                                        disabled="@answering" @onclick="() => Answer(item, choice)">@label</button>
+                                            }
+                                        </div>
+                                    }
+                                }
                                 @if (item.Description != null)
                                 {
                                     <div class="msg-body-text">@((MarkupString)MailFormat.TextToHtml(item.Description))</div>
@@ -181,7 +206,7 @@
 @if (editorOpen)
 {
     <EventEditor @key="editorKey" Event="editing" Calendars="calendars" ColorOf="ColorOf"
-                 DefaultCalendarId="@DefaultCalendar" Day="editorDay" Zone="State.TimeZone"
+                 DefaultCalendarId="@DefaultCalendar" Day="editorDay" Zone="State.TimeZone" Senders="senders"
                  OnSave="SaveEvent" OnDelete="DeleteEvent" OnClose="CloseEditor" />
 }
 
@@ -216,6 +241,15 @@
     private DateOnly editorDay;
     private int editorKey;
 
+    // meetings
+    private IReadOnlyList<SenderIdentity> senders = [];
+    private bool answering;
+    private static readonly (AttendeeStatus, string)[] Answers =
+        [(AttendeeStatus.Accepted, "Yes"), (AttendeeStatus.Tentative, "Maybe"), (AttendeeStatus.Declined, "No")];
+
+    /// <summary>The user's own addresses, which make them a meeting's organiser or one of its guests.</summary>
+    private List<string> Mine => senders.Select(s => s.Email).ToList();
+
     /// <summary>New events go to the first visible calendar.</summary>
     private string? DefaultCalendar => calendars.FirstOrDefault(c => !hidden.Contains(c.Id))?.Id ?? calendars.FirstOrDefault()?.Id;
 
@@ -230,6 +264,8 @@
             if (!string.IsNullOrEmpty(pref)) hidden.UnionWith(pref.Split('\n', StringSplitOptions.RemoveEmptyEntries));
         }
         catch { /* show everything */ }
+        try { senders = await Api.GetSendersAsync(); }
+        catch { /* no organising meetings, but the calendar still works */ }
         BuildGrid();
         await Load();
     }
@@ -406,12 +442,13 @@
 
     private void CloseEditor() => editorOpen = false;
 
-    private async Task<string?> SaveEvent(EventEdit edit, string calendarId)
+    private async Task<string?> SaveEvent(EventEdit edit, string calendarId, bool notify)
     {
         try
         {
-            await CalDav.SaveEventAsync(editing, edit, calendarId, State.TimeZone);
-            State.ShowToast(editing == null ? "Event added" : "Event saved");
+            var (before, after) = await CalDav.SaveEventAsync(editing, edit, calendarId, State.TimeZone);
+            var sent = notify ? await Notify(Scheduling.ForSave(before, after, Mine)) : 0;
+            if (sent >= 0) State.ShowToast((editing == null ? "Event added" : "Event saved") + (sent > 0 ? " and guests emailed" : ""));
             editorOpen = false;
             // Show the day the event now starts on.
             var day = DateOnly.FromDateTime(edit.StartLocal);
@@ -436,13 +473,17 @@
         }
     }
 
-    private async Task<string?> DeleteEvent(bool onlyThisOccurrence)
+    private async Task<string?> DeleteEvent(bool onlyThisOccurrence, bool notify)
     {
         if (editing == null) return null;
         try
         {
-            await CalDav.DeleteEventAsync(editing, onlyThisOccurrence);
-            State.ShowToast(onlyThisOccurrence && editing.IsRecurring ? "Occurrence deleted" : "Event deleted");
+            var single = onlyThisOccurrence && editing.IsRecurring;
+            var before = await CalDav.DeleteEventAsync(editing, onlyThisOccurrence);
+            var sent = notify && before != null
+                ? await Notify(Scheduling.ForDelete(before, single ? editing.OccurrenceId ?? editing.Start : null, editing.AllDay, Mine))
+                : 0;
+            if (sent >= 0) State.ShowToast((single ? "Occurrence deleted" : "Event deleted") + (sent > 0 ? " and guests told" : ""));
             editorOpen = false;
             openEvent = null;
             await Load();
@@ -453,6 +494,53 @@
         {
             return ex.Message;
         }
+    }
+
+    /// <summary>
+    /// Email the guests (or organiser). Returns how many emails went, or -1 after showing why
+    /// they didn't: the calendar change itself is already saved by then.
+    /// </summary>
+    private async Task<int> Notify(List<SchedulingMessage> messages)
+    {
+        if (messages.Count == 0) return 0;
+        try
+        {
+            await Api.SendSchedulingAsync(messages, State.TimeZone);
+            return messages.Count;
+        }
+        catch (Exception ex)
+        {
+            State.ShowToast($"Saved in your calendar, but the email couldn't be sent: {ex.InnerException?.Message ?? ex.Message}", isError: true);
+            return -1;
+        }
+    }
+
+    private bool IsMine(string email) => Scheduling.IsMine(email, Mine);
+
+    private static string GuestSummary(CalendarEvent ev)
+    {
+        var n = ev.Attendees.Count;
+        var parts = new List<string> { $"{n} guest{(n == 1 ? "" : "s")}" };
+        foreach (var (status, word) in new[] { (AttendeeStatus.Accepted, "yes"), (AttendeeStatus.Tentative, "maybe"), (AttendeeStatus.Declined, "no") })
+            if (ev.Attendees.Count(a => a.Status == status) is > 0 and var c) parts.Add($"{c} {word}");
+        if (ev.Attendees.Count(a => a.Status == AttendeeStatus.NeedsAction) is > 0 and var waiting) parts.Add($"{waiting} awaiting");
+        return string.Join(", ", parts);
+    }
+
+    private async Task Answer(CalendarEvent ev, AttendeeStatus answer)
+    {
+        answering = true;
+        try
+        {
+            var reply = await CalDav.AnswerAsync(ev, Mine, answer);
+            if (await Notify([reply]) >= 0) State.ShowToast($"Answer sent to {ev.Organizer?.Display}");
+            await Load();
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            State.ShowToast($"Couldn't answer: {(ex is TaskCanceledException ? "the server did not respond in time." : ex.Message)}", isError: true);
+        }
+        finally { answering = false; }
     }
 
     // ---- filters & navigation ----

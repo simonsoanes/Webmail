@@ -62,6 +62,65 @@
                 <input id="ee-loc" @bind="location" @bind:event="oninput" />
             </div>
             <div class="field">
+                <label for="@(canEditGuests ? "ee-guests" : null)">Guests</label>
+                @if (canEditGuests)
+                {
+                    <div class="guest-add">
+                        <RecipientInput Id="ee-guests" @bind-Value="guestInput" Candidates="candidates" OnFirstFocus="LoadCandidates"
+                                        Placeholder="Invite people by name or email" />
+                        <button type="button" class="btn small" @onclick="() => AddGuests()" disabled="@string.IsNullOrWhiteSpace(guestInput)">Add</button>
+                    </div>
+                    @if (guestError != null) { <span class="help err" role="alert">@guestError</span> }
+                }
+                else if (Event?.Organizer is { } org)
+                {
+                    <span class="help">Organised by @org.Display. Only the organiser can change who's invited.</span>
+                }
+                @if (guests.Count > 0)
+                {
+                    <ul class="guest-list" aria-label="Guests">
+                        @foreach (var g in guests)
+                        {
+                            var guest = g;
+                            <li>
+                                <GuestStatus Status="guest.Status" />
+                                <span class="guest-name" title="@guest.Email">
+                                    @guest.Display
+                                    @if (!string.IsNullOrWhiteSpace(guest.Name)) { <span class="muted">@guest.Email</span> }
+                                </span>
+                                @if (canEditGuests)
+                                {
+                                    <button type="button" class="guest-optional @(guest.Optional ? "on" : "")" aria-pressed="@guest.Optional"
+                                            title="@(guest.Optional ? "Optional: click to make required" : "Required: click to make optional")"
+                                            @onclick="() => ToggleOptional(guest)">@(guest.Optional ? "Optional" : "Required")</button>
+                                    <button type="button" class="icon-btn small" title="Remove @guest.Display" @onclick="() => RemoveGuest(guest)"><Icon Name="x" Size="14" /></button>
+                                }
+                                else if (guest.Optional)
+                                {
+                                    <span class="muted">Optional</span>
+                                }
+                            </li>
+                        }
+                    </ul>
+                }
+            </div>
+            @if (canEditGuests && guests.Count > 0 && Senders.Count > 1 && !organizerFixed)
+            {
+                <div class="field">
+                    <label for="ee-org">Invite as</label>
+                    <select id="ee-org" @bind="organizerEmail">
+                        @foreach (var s in Senders) { <option value="@s.Email">@s</option> }
+                    </select>
+                </div>
+            }
+            @if (canEditGuests && (guests.Count > 0 || initialGuests.Count > 0))
+            {
+                <label class="check-row">
+                    <input type="checkbox" @bind="notifyGuests" /> Email @(Event == null || initialGuests.Count == 0 ? "invitations" : "changes") to guests
+                </label>
+            }
+
+            <div class="field">
                 <label for="ee-desc">Notes</label>
                 <textarea id="ee-desc" rows="3" @bind="description" @bind:event="oninput"></textarea>
             </div>
@@ -78,6 +137,10 @@
                 @if (confirmDelete)
                 {
                     <span class="delete-confirm">
+                        @if (canEditGuests && initialGuests.Count > 0 && notifyGuests)
+                        {
+                            <span class="muted">Guests will be told.</span>
+                        }
                         @if (Event.IsRecurring)
                         {
                             <button type="button" class="btn danger small" @onclick="() => Delete(true)" disabled="@busy">This occurrence</button>
@@ -109,10 +172,12 @@
     [Parameter] public string? DefaultCalendarId { get; set; }
     [Parameter] public DateOnly Day { get; set; }
     [Parameter] public TimeZoneInfo Zone { get; set; } = TimeZoneInfo.Utc;
-    /// <summary>Returns an error message, or null when saved.</summary>
-    [Parameter] public Func<EventEdit, string, Task<string?>>? OnSave { get; set; }
-    /// <summary>Argument: true = only this occurrence. Returns an error message, or null.</summary>
-    [Parameter] public Func<bool, Task<string?>>? OnDelete { get; set; }
+    /// <summary>The user's addresses: who can organise a meeting, and how the editor knows it's theirs.</summary>
+    [Parameter] public IReadOnlyList<SenderIdentity> Senders { get; set; } = [];
+    /// <summary>Arguments: the edit, the calendar, and whether to email the guests. Returns an error message, or null when saved.</summary>
+    [Parameter] public Func<EventEdit, string, bool, Task<string?>>? OnSave { get; set; }
+    /// <summary>Arguments: true = only this occurrence; whether to email the guests. Returns an error message, or null.</summary>
+    [Parameter] public Func<bool, bool, Task<string?>>? OnDelete { get; set; }
     [Parameter] public EventCallback OnClose { get; set; }
 
     private string summary = "", location = "", description = "", calendarId = "";
@@ -124,11 +189,30 @@
     private string initial = "";
     private ElementReference titleInput;
 
+    // guests
+    private List<EventAttendee> guests = new();
+    private IReadOnlyList<EventAttendee> initialGuests = [];
+    private string guestInput = "", organizerEmail = "";
+    private string? guestError;
+    private bool notifyGuests = true, canEditGuests = true, organizerFixed, candidatesRequested;
+    private IReadOnlyList<RecipientCandidate>? candidates;
+
     protected override async Task OnInitializedAsync()
     {
         calendarId = Event?.CalendarId ?? DefaultCalendarId ?? Calendars.FirstOrDefault()?.Id ?? "";
+        organizerEmail = Senders.FirstOrDefault()?.Email ?? "";
         if (Event is { } ev)
         {
+            guests = ev.Attendees.ToList();
+            initialGuests = ev.Attendees;
+            if (ev.Organizer is { } org)
+            {
+                // A meeting someone else organises: its guest list is theirs.
+                var mine = Senders.FirstOrDefault(s => s.Email.Equals(org.Email, StringComparison.OrdinalIgnoreCase));
+                canEditGuests = mine != null;
+                organizerFixed = true;
+                if (mine != null) organizerEmail = mine.Email;
+            }
             summary = ev.Summary == "(no title)" ? "" : ev.Summary;
             location = ev.Location ?? "";
             description = ev.Description ?? "";
@@ -176,7 +260,8 @@
         if (firstRender) try { await titleInput.FocusAsync(); } catch { /* not attached */ }
     }
 
-    private string Snapshot() => string.Join("|", summary, location, description, calendarId, allDay, startDate, startTime, endDate, endTime, repeat);
+    private string Snapshot() => string.Join("|", summary, location, description, calendarId, allDay, startDate, startTime, endDate, endTime, repeat,
+        string.Join(",", guests.Select(g => g.Email + g.Optional)), guestInput.Trim(), organizerEmail);
 
     private DateTime StartValue => startDate.ToDateTime(allDay ? TimeOnly.MinValue : startTime);
     private DateTime EndValue => endDate.ToDateTime(allDay ? TimeOnly.MinValue : endTime);
@@ -203,9 +288,59 @@
         EndChanged();
     }
 
+    // ---- guests ----
+
+    private async Task LoadCandidates()
+    {
+        if (candidatesRequested) return;
+        candidatesRequested = true;
+        try
+        {
+            var list = await Dav.GetContactsAsync();
+            if (list != null) candidates = RecipientSuggester.FromContacts(list.Contacts);
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            // Suggestions are a convenience; typing addresses still works.
+        }
+    }
+
+    /// <summary>Add the typed addresses to the guest list. False when one of them isn't an address.</summary>
+    private bool AddGuests()
+    {
+        guestError = null;
+        var bad = new List<string>();
+        foreach (var a in MailFormat.ParseAddressList(guestInput))
+        {
+            var email = a.Email.Trim();
+            if (!System.Text.RegularExpressions.Regex.IsMatch(email, @"^[^@\s]+@[^@\s]+$")) { bad.Add(a.ToString()); continue; }
+            if (guests.Any(g => g.Email.Equals(email, StringComparison.OrdinalIgnoreCase))) continue;
+            var earlier = initialGuests.FirstOrDefault(g => g.Email.Equals(email, StringComparison.OrdinalIgnoreCase));
+            guests.Add(earlier ?? new EventAttendee(email, string.IsNullOrWhiteSpace(a.Name) ? null : a.Name.Trim()));
+        }
+        guestInput = string.Join(", ", bad);
+        if (bad.Count > 0) guestError = bad.Count == 1 ? $"\"{bad[0]}\" isn't an email address." : "Some of these aren't email addresses.";
+        return bad.Count == 0;
+    }
+
+    private void RemoveGuest(EventAttendee guest) => guests.Remove(guest);
+
+    private void ToggleOptional(EventAttendee guest)
+    {
+        var i = guests.IndexOf(guest);
+        if (i >= 0) guests[i] = guest with { Optional = !guest.Optional };
+    }
+
     private async Task Save()
     {
         error = null;
+        if (canEditGuests && !string.IsNullOrWhiteSpace(guestInput) && !AddGuests()) return;
+        var organizer = Senders.FirstOrDefault(s => s.Email == organizerEmail);
+        if (canEditGuests && guests.Count > 0 && organizer == null)
+        {
+            error = "Your email addresses couldn't be loaded, so guests can't be invited right now.";
+            return;
+        }
         var (start, end) = (StartValue, EndValue);
         if (end < start)
         {
@@ -217,16 +352,17 @@
             error = "Choose a calendar.";
             return;
         }
-        var edit = new EventEdit(summary, location, description, allDay, start, end, repeat);
+        var edit = new EventEdit(summary, location, description, allDay, start, end, repeat,
+            canEditGuests ? guests : null, organizer);
         busy = true;
-        try { if (OnSave != null) error = await OnSave(edit, calendarId); }
+        try { if (OnSave != null) error = await OnSave(edit, calendarId, canEditGuests && notifyGuests); }
         finally { busy = false; }
     }
 
     private async Task Delete(bool onlyThis)
     {
         busy = true;
-        try { if (OnDelete != null) error = await OnDelete(onlyThis); }
+        try { if (OnDelete != null) error = await OnDelete(onlyThis, canEditGuests && notifyGuests); }
         finally { busy = false; }
     }
 

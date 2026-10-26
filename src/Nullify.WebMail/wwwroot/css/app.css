@@ -902,6 +902,29 @@ select.compact { width: auto; }
 .select-with-dot { --cal: var(--accent); position: relative; }
 .select-with-dot .dot { position: absolute; left: .7rem; top: 50%; width: 10px; height: 10px; margin-top: -5px; border-radius: 50%; background: var(--cal); pointer-events: none; }
 .select-with-dot select { padding-left: 1.75rem; height: 40px; }
+.guest-add { display: flex; gap: .5rem; align-items: center; }
+.guest-add .recipient-input { flex: 1; min-width: 0; }
+.guest-add .btn { flex: none; height: 36px; }
+.field .help.err { color: var(--err-text); }
+.guest-list { list-style: none; margin: .4rem 0 0; padding: 0; display: flex; flex-direction: column; gap: .15rem; }
+.guest-list li { display: flex; align-items: center; gap: .5rem; min-height: 32px; padding: .1rem .25rem; border-radius: var(--radius-sm); font-size: .88rem; }
+.guest-list li:hover { background: var(--surface-2); }
+.guest-list.compact li { min-height: 24px; padding: 0; font-size: .82rem; }
+.guest-list.compact li:hover { background: none; }
+.guest-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.guest-name .muted { margin-left: .35rem; font-size: .8rem; }
+.guest-status { flex: none; display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; font-size: .72rem; font-weight: 700; line-height: 1;
+    background: var(--surface-3); color: var(--muted); }
+.guest-status.accepted { background: var(--ok-bg); color: var(--ok-text); }
+.guest-status.declined { background: var(--err-bg); color: var(--err-text); }
+.guest-status.tentative { background: var(--warn-bg); color: var(--warn-text); }
+.guest-optional { flex: none; border: 1px solid var(--border); background: transparent; color: var(--muted); border-radius: 999px; padding: .1rem .55rem; font-size: .74rem; cursor: pointer; }
+.guest-optional.on { background: var(--surface-3); color: var(--text-2); }
+.guest-optional:hover { border-color: var(--border-strong); color: var(--text); }
+.agenda-guests { display: flex; flex-direction: column; gap: .25rem; }
+.rsvp { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+.rsvp > span { font-weight: 600; color: var(--text-2); margin-right: .2rem; }
+.delete-confirm .muted { font-size: .8rem; }
 .check-row { display: inline-flex; align-items: center; gap: .5rem; font-size: .9rem; margin-bottom: .75rem; cursor: pointer; }
 .when-grid { display: grid; grid-template-columns: 56px minmax(0, 1fr) 120px; gap: .45rem .5rem; align-items: center; margin-bottom: .9rem; }
 .when-grid label { font-size: .82rem; font-weight: 600; color: var(--text-2); }

@@ -1,0 +1,24 @@
+@* A guest's answer to an invitation as a small badge. *@
+<span class="guest-status @Status.ToString().ToLowerInvariant()" title="@Text" role="img" aria-label="@Text">
+    @switch (Status)
+    {
+        case AttendeeStatus.Accepted: <Icon Name="check" Size="11" /> break;
+        case AttendeeStatus.Declined: <Icon Name="x" Size="11" /> break;
+        case AttendeeStatus.Tentative: <span aria-hidden="true">?</span> break;
+        case AttendeeStatus.Delegated: <Icon Name="forward" Size="11" /> break;
+        default: <span aria-hidden="true">…</span> break;
+    }
+</span>
+
+@code {
+    [Parameter] public AttendeeStatus Status { get; set; }
+
+    private string Text => Status switch
+    {
+        AttendeeStatus.Accepted => "Accepted",
+        AttendeeStatus.Declined => "Declined",
+        AttendeeStatus.Tentative => "Maybe",
+        AttendeeStatus.Delegated => "Delegated",
+        _ => "No answer yet",
+    };
+}

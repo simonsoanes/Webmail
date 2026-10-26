@@ -18,8 +18,9 @@ public sealed partial class CalDavAccountService
     /// of a repeating event the change applies to the whole series: a moved occurrence moves
     /// every occurrence by the same amount.
     /// </summary>
+    /// <returns>The .ics before (null when new) and as written, to work out what to tell guests.</returns>
     /// <exception cref="CalDavException">The server refused the change (read-only, conflict...).</exception>
-    public async Task SaveEventAsync(CalendarEvent? existing, EventEdit edit, string calendarId, TimeZoneInfo zone)
+    public async Task<(string? Before, string After)> SaveEventAsync(CalendarEvent? existing, EventEdit edit, string calendarId, TimeZoneInfo zone)
     {
         var account = await ResolveAccountAsync() ?? throw new CalDavException("No calendar server is configured.");
         var calendarUri = new Uri(calendarId.EndsWith('/') ? calendarId : calendarId + "/");
@@ -31,7 +32,7 @@ public sealed partial class CalDavAccountService
             var created = await SendResourceAsync(account, HttpMethod.Put, new Uri(calendarUri, uid + ".ics"), ics,
                 "text/calendar; charset=utf-8", new() { ["If-None-Match"] = "*" });
             EnsureWriteSucceeded(created.Status, "event");
-            return;
+            return (null, ics);
         }
 
         var href = new Uri(existing.Href);
@@ -68,7 +69,7 @@ public sealed partial class CalDavAccountService
             var put = await SendResourceAsync(account, HttpMethod.Put, href, updated, "text/calendar; charset=utf-8",
                 etag != null ? new() { ["If-Match"] = etag } : []);
             EnsureWriteSucceeded(put.Status, "event");
-            return;
+            return (raw, updated);
         }
 
         // Moving to another calendar: create it there first, then remove the original.
@@ -79,10 +80,12 @@ public sealed partial class CalDavAccountService
         var delete = await SendResourceAsync(account, HttpMethod.Delete, href, null, null,
             etag != null ? new() { ["If-Match"] = etag } : []);
         if (delete.Status != HttpStatusCode.NotFound) EnsureWriteSucceeded(delete.Status, "event");
+        return (raw, updated);
     }
 
     /// <summary>Delete an event; for a repeating event either just this occurrence or the whole series.</summary>
-    public async Task DeleteEventAsync(CalendarEvent ev, bool onlyThisOccurrence)
+    /// <returns>The .ics as it was, to work out who to tell; null when it was already gone.</returns>
+    public async Task<string?> DeleteEventAsync(CalendarEvent ev, bool onlyThisOccurrence)
     {
         var account = await ResolveAccountAsync() ?? throw new CalDavException("No calendar server is configured.");
         if (ev.Href == null) throw new CalDavException("This event can't be deleted (unknown location on the server).");
@@ -95,12 +98,37 @@ public sealed partial class CalDavAccountService
             var put = await SendResourceAsync(account, HttpMethod.Put, href, updated, "text/calendar; charset=utf-8",
                 etag != null ? new() { ["If-Match"] = etag } : []);
             EnsureWriteSucceeded(put.Status, "event");
-            return;
+            return raw;
         }
 
+        // Read it first only for a meeting: the guests are told from what it held.
+        string? before = null;
+        if (ev.Organizer != null)
+            try { (before, _) = await FetchEventAsync(account, href); }
+            catch (CalDavException) { /* deleted elsewhere; the DELETE says so */ }
         var resp = await SendResourceAsync(account, HttpMethod.Delete, href, null, null,
             ev.ETag != null ? new() { ["If-Match"] = ev.ETag } : []);
-        if (resp.Status != HttpStatusCode.NotFound) EnsureWriteSucceeded(resp.Status, "event");
+        if (resp.Status == HttpStatusCode.NotFound) return null;
+        EnsureWriteSucceeded(resp.Status, "event");
+        return before;
+    }
+
+    /// <summary>
+    /// Answer an invitation in the user's calendar: store their answer and return the reply
+    /// to email the organiser.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The user isn't a guest of this meeting.</exception>
+    public async Task<SchedulingMessage> AnswerAsync(CalendarEvent ev, IReadOnlyCollection<string> mine, AttendeeStatus answer)
+    {
+        var account = await ResolveAccountAsync() ?? throw new CalDavException("No calendar server is configured.");
+        if (ev.Href == null) throw new CalDavException("This event can't be changed (unknown location on the server).");
+        var href = new Uri(ev.Href);
+        var (raw, etag) = await FetchEventAsync(account, href);
+        var (updated, reply) = Scheduling.Answer(raw, mine, answer);
+        var put = await SendResourceAsync(account, HttpMethod.Put, href, updated, "text/calendar; charset=utf-8",
+            etag != null ? new() { ["If-Match"] = etag } : []);
+        EnsureWriteSucceeded(put.Status, "event");
+        return reply;
     }
 
     /// <summary>The repeat setting of the series an event belongs to (for the editor).</summary>

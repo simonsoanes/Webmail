@@ -3,6 +3,7 @@
 
 using System.Globalization;
 using System.Text;
+using Nullify.WebMail.Shared;
 
 namespace Nullify.WebMail.Services;
 
@@ -26,6 +27,9 @@ public sealed class ICalEvent
     public DateTime? RecurrenceIdWall { get; init; }
     /// <summary>Set on instances produced by <see cref="ICalendar.Expand"/> from an RRULE.</summary>
     public bool FromSeries { get; init; }
+    public EventAttendee? Organizer { get; init; }
+    public List<EventAttendee> Attendees { get; init; } = new();
+    public int Sequence { get; init; }
 
     public bool IsRecurring => RRule != null || RecurrenceIdWall != null || FromSeries;
 
@@ -50,6 +54,7 @@ public static partial class ICalendar
         var events = new List<ICalEvent>();
         Dictionary<string, (string Value, Dictionary<string, string> Params)>? props = null;
         List<(string Value, Dictionary<string, string> Params)>? exdates = null;
+        List<EventAttendee>? attendees = null;
         var depth = 0; // nesting inside VEVENT (VALARM etc.)
 
         foreach (var line in Unfold(ics))
@@ -58,6 +63,7 @@ public static partial class ICalendar
             {
                 props = new(StringComparer.OrdinalIgnoreCase);
                 exdates = new();
+                attendees = new();
                 depth = 0;
                 continue;
             }
@@ -68,7 +74,7 @@ public static partial class ICalendar
                 if (depth > 0) { depth--; continue; }
                 if (line.Equals("END:VEVENT", StringComparison.OrdinalIgnoreCase))
                 {
-                    var ev = Build(props, exdates!, floatingZone);
+                    var ev = Build(props, exdates!, attendees!, floatingZone);
                     if (ev != null) events.Add(ev);
                     props = null;
                 }
@@ -78,6 +84,7 @@ public static partial class ICalendar
 
             var (name, parameters, value) = SplitProperty(line);
             if (name.Equals("EXDATE", StringComparison.OrdinalIgnoreCase)) exdates!.Add((value, parameters));
+            else if (name.Equals("ATTENDEE", StringComparison.OrdinalIgnoreCase)) { if (ParsePerson(value, parameters) is { } a) attendees!.Add(a); }
             else props.TryAdd(name, (value, parameters));
         }
         return events;
@@ -85,7 +92,7 @@ public static partial class ICalendar
 
     private static ICalEvent? Build(
         Dictionary<string, (string Value, Dictionary<string, string> Params)> p,
-        List<(string Value, Dictionary<string, string> Params)> exdates, TimeZoneInfo floating)
+        List<(string Value, Dictionary<string, string> Params)> exdates, List<EventAttendee> attendees, TimeZoneInfo floating)
     {
         if (!p.TryGetValue("DTSTART", out var dtStart)) return null;
         if (!TryParseTime(dtStart.Value, dtStart.Params, floating, out var start, out var zone, out var allDay)) return null;
@@ -116,6 +123,9 @@ public static partial class ICalendar
             Zone = zone,
             RRule = p.GetValueOrDefault("RRULE").Value,
             RecurrenceIdWall = recurrenceId,
+            Organizer = p.TryGetValue("ORGANIZER", out var org) ? ParsePerson(org.Value, org.Params) : null,
+            Attendees = attendees,
+            Sequence = int.TryParse(p.GetValueOrDefault("SEQUENCE").Value, out var seq) ? seq : 0,
         };
         foreach (var (value, parameters) in exdates)
             foreach (var part in value.Split(','))
@@ -153,6 +163,7 @@ public static partial class ICalendar
                 {
                     Uid = ev.Uid, Summary = ev.Summary, Location = ev.Location, Description = ev.Description,
                     Status = ev.Status, AllDay = ev.AllDay, Zone = ev.Zone,
+                    Organizer = ev.Organizer, Attendees = ev.Attendees, Sequence = ev.Sequence,
                     StartWall = wall, EndWall = wall + (ev.EndWall - ev.StartWall), FromSeries = true,
                 };
                 if (Overlaps(instance.Start, instance.End, from, to)) result.Add(instance);
@@ -235,6 +246,33 @@ public static partial class ICalendar
         "MO" => DayOfWeek.Monday, "TU" => DayOfWeek.Tuesday, "WE" => DayOfWeek.Wednesday, "TH" => DayOfWeek.Thursday,
         "FR" => DayOfWeek.Friday, "SA" => DayOfWeek.Saturday, "SU" => DayOfWeek.Sunday, _ => null,
     };
+
+    // ------------------------------------------------------------------ people
+
+    /// <summary>An ORGANIZER or ATTENDEE ("mailto:a@b" with CN, PARTSTAT and ROLE); null without an address.</summary>
+    internal static EventAttendee? ParsePerson(string value, Dictionary<string, string> parameters)
+    {
+        var email = AddressOf(value);
+        if (email.Length == 0) return null;
+        var status = parameters.GetValueOrDefault("PARTSTAT")?.ToUpperInvariant() switch
+        {
+            "ACCEPTED" => AttendeeStatus.Accepted,
+            "TENTATIVE" => AttendeeStatus.Tentative,
+            "DECLINED" => AttendeeStatus.Declined,
+            "DELEGATED" => AttendeeStatus.Delegated,
+            _ => AttendeeStatus.NeedsAction,
+        };
+        var name = parameters.GetValueOrDefault("CN");
+        return new EventAttendee(email, string.IsNullOrWhiteSpace(name) ? null : name.Trim(), status,
+            string.Equals(parameters.GetValueOrDefault("ROLE"), "OPT-PARTICIPANT", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>"mailto:a@b" → "a@b" (other URI schemes are kept as they are).</summary>
+    internal static string AddressOf(string value)
+    {
+        value = value.Trim();
+        return value.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase) ? value[7..].Trim() : value;
+    }
 
     // ------------------------------------------------------------------ values
 
