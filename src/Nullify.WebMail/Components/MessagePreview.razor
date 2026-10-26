@@ -173,6 +173,12 @@
                     @PgpBanner
                 }
 
+                @if (message.Scheduling is { } invite)
+                {
+                    <InvitationCard @key="@($"{loadedFolder}/{loadedUid}")" Ics="@invite"
+                                    From="@([sender.Email, .. MailFormat.ParseAddressList(Header("Sender")).Select(a => a.Email)])" />
+                }
+
                 @if (hasRemoteContent && !remoteContentAllowed)
                 {
                     <div class="notice">

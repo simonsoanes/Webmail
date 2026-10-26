@@ -86,8 +86,11 @@ public static class MimeParser
         }
 
         if (mediaType == "message/rfc822" && filename == null) filename = "message.eml";
+        // An invitation's text/calendar alternative is shown as the invitation, not as a file.
+        var calendarBody = mediaType == "text/calendar" && !isAttachment && filename == null;
+        if (calendarBody) filename = "invite.ics";
         filename ??= contentId != null ? contentId : $"part-{id}";
-        var inline = !isAttachment && contentId != null && mediaType.StartsWith("image/");
+        var inline = calendarBody || (!isAttachment && contentId != null && mediaType.StartsWith("image/"));
         parts.Attachments.Add(new MimeAttachment(id, filename, mediaType, data, contentId, inline));
     }
 

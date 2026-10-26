@@ -131,8 +131,21 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsSe
                 .ToList();
             var senderAuth = SenderAuth.Analyse(Encoding.Latin1.GetString(raw), settings.Current.ImapAuthServIds);
             return new MessageContent(Encoding.UTF8.GetString(raw), html, parsed.TextBody, parsed.Headers, attachments,
-                DetectPgp(parsed), senderAuth);
+                DetectPgp(parsed), senderAuth, FindScheduling(parsed));
         });
+
+    /// <summary>
+    /// The iTIP object of an invitation, cancellation or reply email (RFC 6047): a text/calendar
+    /// part with a METHOD, or an attached .ics carrying one.
+    /// </summary>
+    public static string? FindScheduling(MimeParts parsed) =>
+        parsed.Attachments
+            .Where(a => a.ContentType is "text/calendar" or "application/ics" ||
+                        a.Filename.EndsWith(".ics", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(a => a.ContentType == "text/calendar" ? 0 : 1)
+            .Select(a => Encoding.UTF8.GetString(a.Data).TrimStart('\uFEFF'))
+            .FirstOrDefault(ics => ICalendar.UnfoldLines(ics).Take(50)
+                .Any(l => l.StartsWith("METHOD:", StringComparison.OrdinalIgnoreCase)));
 
     /// <summary>OpenPGP content for the browser to decrypt/verify: PGP/MIME first, then inline blocks.</summary>
     public static PgpMessageInfo? DetectPgp(MimeParts parsed)

@@ -1,0 +1,286 @@
+@using Nullify.WebMail.Services
+@inject CalDavAccountService Dav
+@inject ApiService Api
+@inject AppState State
+
+@* An invitation, cancellation or reply carried by the open message, with what can be done about it. *@
+@if (m != null)
+{
+    <section class="invite-card @(m.Method == "CANCEL" ? "cancelled" : "")" aria-label="@KindText">
+        @if (m.Event is { } ev)
+        {
+            var day = ev.AllDay ? ev.Start.UtcDateTime : TimeZoneInfo.ConvertTime(ev.Start, State.TimeZone).DateTime;
+            <div class="invite-date" aria-hidden="true">
+                <span class="month">@day.ToString("MMM", Inv)</span>
+                <span class="day">@day.Day</span>
+                <span class="weekday">@day.ToString("ddd", Inv)</span>
+            </div>
+        }
+        else
+        {
+            <div class="invite-date" aria-hidden="true"><Icon Name="calendar" Size="22" /></div>
+        }
+        <div class="invite-main">
+            <div class="invite-kind">@KindText</div>
+            <div class="invite-title">@m.Summary</div>
+            @if (m.Event is { } e && m.Method != "REPLY")
+            {
+                <div class="invite-when">@Scheduling.When(e, State.TimeZone)</div>
+                @if (e.Location != null) { <div class="invite-where">@e.Location</div> }
+            }
+            @if (m.Method == "REQUEST" && m.Organizer is { } org)
+            {
+                <div class="muted">Organised by @org.Display@(m.Attendees.Count > 0 ? $" · {m.Attendees.Count} guest{(m.Attendees.Count == 1 ? "" : "s")}" : "")</div>
+            }
+
+            @if (loading)
+            {
+                <div class="invite-status"><span class="spinner"></span> Checking your calendar…</div>
+            }
+            else
+            {
+                @if (status != null)
+                {
+                    <div class="invite-status @(statusIsError ? "err" : "")" role="@(statusIsError ? "alert" : null)">@status</div>
+                }
+                @switch (action)
+                {
+                    case Action_.Answer:
+                        <div class="invite-actions">
+                            @if (stored == null && calendars.Count > 1)
+                            {
+                                <select @bind="calendarId" aria-label="Calendar to add it to" disabled="@busy">
+                                    @foreach (var c in calendars) { <option value="@c.Id">@c.Name</option> }
+                                </select>
+                            }
+                            <span class="rsvp" role="group" aria-label="Your answer">
+                                <span>Going?</span>
+                                @foreach (var (answer, label) in Answers)
+                                {
+                                    var choice = answer;
+                                    <button class="btn small @(current == choice ? "accent" : "")" aria-pressed="@(current == choice)"
+                                            disabled="@busy" @onclick="() => Answer(choice)">@label</button>
+                                }
+                            </span>
+                        </div>
+                        break;
+                    case Action_.Cancel:
+                        <div class="invite-actions">
+                            <button class="btn small danger" disabled="@busy" @onclick="ApplyCancel">
+                                @if (busy) { <span class="spinner"></span> }
+                                <Icon Name="trash" Size="14" /> @(m.ForOccurrence ? "Remove this occurrence" : "Remove from calendar")
+                            </button>
+                        </div>
+                        break;
+                    case Action_.Reply:
+                        <div class="invite-actions">
+                            <button class="btn small accent" disabled="@busy" @onclick="ApplyReply">
+                                @if (busy) { <span class="spinner"></span> }
+                                <Icon Name="users" Size="14" /> Update guest list
+                            </button>
+                        </div>
+                        break;
+                }
+            }
+        </div>
+    </section>
+}
+
+@code {
+    /// <summary>The iTIP calendar the message carries.</summary>
+    [Parameter, EditorRequired] public string Ics { get; set; } = "";
+    /// <summary>The message's From and Sender addresses: who it really came from, as far as the mail says.</summary>
+    [Parameter] public IReadOnlyList<string> From { get; set; } = [];
+
+    private enum Action_ { None, Answer, Cancel, Reply }
+
+    private static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+    private static readonly (AttendeeStatus, string)[] Answers =
+        [(AttendeeStatus.Accepted, "Yes"), (AttendeeStatus.Tentative, "Maybe"), (AttendeeStatus.Declined, "No")];
+
+    private IncomingScheduling? m;
+    private CalDavAccountService.StoredEvent? stored;
+    private IReadOnlyList<CalendarInfo> calendars = [];
+    private List<string> mine = [];
+    private string calendarId = "";
+    private AttendeeStatus? current;
+    private Action_ action;
+    private string? status;
+    private bool statusIsError, loading = true, busy;
+    private string? loadedIcs;
+
+    private string KindText => m?.Method switch
+    {
+        "REQUEST" when stored != null && m.Sequence > Scheduling.SequenceOf(stored.Raw) => "Updated invitation",
+        "REQUEST" => "Invitation",
+        "CANCEL" => m.ForOccurrence ? "Occurrence cancelled" : "Event cancelled",
+        _ => m?.Attendees.FirstOrDefault() is { } g ? $"{g.Display} {AnswerWord(g.Status)}" : "Reply",
+    };
+
+    private static string AnswerWord(AttendeeStatus s) => s switch
+    {
+        AttendeeStatus.Accepted => "accepted",
+        AttendeeStatus.Tentative => "might attend",
+        AttendeeStatus.Declined => "declined",
+        AttendeeStatus.Delegated => "delegated",
+        _ => "replied",
+    };
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Ics == loadedIcs) return;
+        loadedIcs = Ics;
+        m = Scheduling.Read(Ics, State.TimeZone);
+        if (m == null) return;
+        await Refresh();
+    }
+
+    private async Task Refresh()
+    {
+        if (m == null) return;
+        loading = true;
+        status = null;
+        statusIsError = false;
+        action = Action_.None;
+        try
+        {
+            if (mine.Count == 0)
+                try { mine = (await Api.GetSendersAsync()).Select(s => s.Email).ToList(); } catch { /* treated as nobody's */ }
+            var cals = await Dav.GetCalendarsAsync();
+            if (cals == null)
+            {
+                Say("Set up a calendar server in Settings to act on this here.");
+                return;
+            }
+            calendars = cals;
+            if (calendarId.Length == 0) calendarId = calendars.FirstOrDefault()?.Id ?? "";
+            stored = await Dav.FindEventAsync(m.Uid);
+            Decide();
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            Say(ex is TaskCanceledException ? "Your calendar server did not respond in time." : $"Couldn't check your calendar: {ex.Message}", error: true);
+        }
+        finally { loading = false; }
+    }
+
+    /// <summary>What the card says and offers, given the message and what the calendar holds.</summary>
+    private void Decide()
+    {
+        var m = this.m!;
+        var where = stored == null ? null : calendars.FirstOrDefault(c => c.Id == stored.CalendarId)?.Name ?? "your calendar";
+        switch (m.Method)
+        {
+            case "REQUEST":
+                if (m.Organizer is { } org && Scheduling.IsMine(org.Email, mine)) { Say("You sent this invitation."); return; }
+                if (!m.Attendees.Any(a => Scheduling.IsMine(a.Email, mine)))
+                {
+                    Say("You aren't on the guest list (it may have been sent to a group), so it can't be answered here.");
+                    return;
+                }
+                current = stored != null ? Scheduling.AnswerIn(stored.Raw, mine) : null;
+                if (current == AttendeeStatus.NeedsAction) current = null;
+                if (stored == null) Say(null);
+                else if (Scheduling.SequenceOf(stored.Raw) > m.Sequence) Say($"A newer version is already in {where}.");
+                else if (m.Sequence > Scheduling.SequenceOf(stored.Raw)) Say($"Answering updates the copy in {where}.");
+                else Say($"In {where}.");
+                if (calendars.Count == 0 && stored == null) { Say("You have no calendar to add it to.", error: true); return; }
+                action = Action_.Answer;
+                return;
+
+            case "CANCEL":
+                if (stored == null) { Say("It isn't in your calendar."); return; }
+                if (Scheduling.WhyNotFromOrganizer(m, stored.Raw, From) is { } why) { Say(why, error: true); return; }
+                if (m.ForOccurrence && m.RecurrenceId is { } rid && ICalendar.ParseEvents(stored.Raw, State.TimeZone)
+                        .Any(e => e.RecurrenceIdWall == null && e.ExDatesWall.Any(x => e.ToOffset(x) == rid)))
+                {
+                    Say("This occurrence is already removed from your calendar.");
+                    return;
+                }
+                Say($"It's in {where}.");
+                action = Action_.Cancel;
+                return;
+
+            case "REPLY":
+                if (stored == null) { Say("The meeting isn't in your calendar any more."); return; }
+                try
+                {
+                    var (_, guest) = Scheduling.ApplyReply(stored.Raw, m, From, mine);
+                    var recorded = ICalendar.ParseEvents(stored.Raw, State.TimeZone).FirstOrDefault(e => e.RecurrenceIdWall == null)?
+                        .Attendees.FirstOrDefault(a => a.Email.Equals(guest.Email, StringComparison.OrdinalIgnoreCase));
+                    if (!m.ForOccurrence && recorded?.Status == guest.Status) { Say("Your guest list already shows this answer."); return; }
+                    Say(null);
+                    action = Action_.Reply;
+                }
+                catch (InvalidOperationException ex) { Say(ex.Message, error: true); }
+                return;
+        }
+    }
+
+    private void Say(string? text, bool error = false)
+    {
+        status = text;
+        statusIsError = error;
+    }
+
+    private async Task Answer(AttendeeStatus answer)
+    {
+        if (m == null) return;
+        busy = true;
+        try
+        {
+            var reply = await Dav.AnswerInvitationAsync(m, calendarId, mine, answer, From);
+            try
+            {
+                await Api.SendSchedulingAsync([reply], State.TimeZone);
+                State.ShowToast($"Answer sent to {m.Organizer?.Display ?? "the organiser"}");
+            }
+            catch (Exception ex)
+            {
+                State.ShowToast($"Your answer is in your calendar, but the email to the organiser failed: {ex.InnerException?.Message ?? ex.Message}", isError: true);
+            }
+            await Refresh();
+            if (answer == AttendeeStatus.Declined && stored == null) Say("Declined. It wasn't added to your calendar.");
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            Say(ex is TaskCanceledException ? "Your calendar server did not respond in time." : ex.Message, error: true);
+        }
+        finally { busy = false; }
+    }
+
+    private async Task ApplyCancel()
+    {
+        if (m == null) return;
+        busy = true;
+        try
+        {
+            await Dav.ApplyCancellationAsync(m, From);
+            State.ShowToast(m.ForOccurrence ? "Occurrence removed from your calendar" : "Event removed from your calendar");
+            await Refresh();
+            if (!m.ForOccurrence) Say("Removed from your calendar.");
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            Say(ex is TaskCanceledException ? "Your calendar server did not respond in time." : ex.Message, error: true);
+        }
+        finally { busy = false; }
+    }
+
+    private async Task ApplyReply()
+    {
+        if (m == null) return;
+        busy = true;
+        try
+        {
+            var guest = await Dav.ApplyReplyAsync(m, From, mine);
+            State.ShowToast($"{guest.Display} {AnswerWord(guest.Status)}: guest list updated");
+            await Refresh();
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            Say(ex is TaskCanceledException ? "Your calendar server did not respond in time." : ex.Message, error: true);
+        }
+        finally { busy = false; }
+    }
+}

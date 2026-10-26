@@ -166,6 +166,112 @@ public sealed partial class CalDavAccountService
         return (added, existing);
     }
 
+    // ------------------------------------------------------------------ invitations by email
+
+    /// <summary>An event resource as stored, found by UID.</summary>
+    public sealed record StoredEvent(string CalendarId, string Href, string Raw, string? ETag);
+
+    /// <summary>The event with this UID in any of the user's calendars, or null.</summary>
+    public async Task<StoredEvent?> FindEventAsync(string uid)
+    {
+        if (await DiscoveredAsync() is not { } d) return null;
+        var body = $"""
+            <?xml version="1.0" encoding="utf-8"?>
+            <c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+              <d:prop><d:getetag/><c:calendar-data/></d:prop>
+              <c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">
+                <c:prop-filter name="UID"><c:text-match collation="i;octet">{System.Security.SecurityElement.Escape(uid)}</c:text-match></c:prop-filter>
+              </c:comp-filter></c:comp-filter></c:filter>
+            </c:calendar-query>
+            """;
+        foreach (var c in d.Found.Collections.Where(c => c.Supports("VEVENT")))
+        {
+            System.Xml.Linq.XDocument doc;
+            try { (_, doc) = await SendAsync(d.Account, "REPORT", c.Href, 1, body); }
+            catch (CalDavException ex)
+            {
+                logger.LogInformation("CalDAV UID search in {Calendar} failed: {Msg}", c.Href, ex.Message);
+                continue;
+            }
+            foreach (var r in doc.Descendants(Dav + "response"))
+            {
+                var data = r.Descendants(Cal + "calendar-data").FirstOrDefault()?.Value;
+                var href = r.Element(Dav + "href")?.Value.Trim();
+                // text-match is a substring match: check the UID itself.
+                if (string.IsNullOrEmpty(data) || string.IsNullOrEmpty(href) ||
+                    !ICalendar.ParseEvents(data, TimeZoneInfo.Utc).Any(e => e.Uid == uid)) continue;
+                var etag = r.Descendants(Dav + "getetag").FirstOrDefault()?.Value.Trim();
+                return new StoredEvent(c.Info.Id, new Uri(c.Href, href).AbsoluteUri, data, string.IsNullOrWhiteSpace(etag) ? null : etag);
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Answer an emailed invitation: store it (in <paramref name="calendarId"/> when it's new, or
+    /// over the copy already in the calendar unless that copy is newer) with the user's answer,
+    /// and return the reply for the organiser. Declining a new invitation stores nothing.
+    /// </summary>
+    /// <param name="from">The email's From and Sender addresses.</param>
+    /// <exception cref="InvalidOperationException">The user isn't a guest, or it can't replace the stored copy.</exception>
+    public async Task<SchedulingMessage> AnswerInvitationAsync(IncomingScheduling invitation, string calendarId,
+        IReadOnlyCollection<string> mine, AttendeeStatus answer, IReadOnlyCollection<string> from)
+    {
+        var account = await ResolveAccountAsync() ?? throw new CalDavException("No calendar server is configured.");
+        var stored = await FindEventAsync(invitation.Uid);
+        var content = Scheduling.ForCalendar(invitation);
+        if (stored != null)
+        {
+            if (Scheduling.SequenceOf(stored.Raw) > invitation.Sequence) content = stored.Raw; // answer the newer copy
+            else if (Scheduling.WhyNotFromOrganizer(invitation, stored.Raw, from) is { } why)
+                throw new InvalidOperationException("It can't replace the event in your calendar. " + why);
+        }
+        var (updated, reply) = Scheduling.Answer(content, mine, answer);
+        if (stored == null && answer == AttendeeStatus.Declined) return reply;
+
+        var put = stored != null
+            ? await SendResourceAsync(account, HttpMethod.Put, new Uri(stored.Href), updated, "text/calendar; charset=utf-8",
+                stored.ETag != null ? new() { ["If-Match"] = stored.ETag } : [])
+            : await SendResourceAsync(account, HttpMethod.Put,
+                new Uri(new Uri(calendarId.EndsWith('/') ? calendarId : calendarId + "/"), Uri.EscapeDataString(invitation.Uid) + ".ics"),
+                updated, "text/calendar; charset=utf-8", new() { ["If-None-Match"] = "*" });
+        EnsureWriteSucceeded(put.Status, "event");
+        return reply;
+    }
+
+    /// <summary>Apply an organiser's cancellation: delete the event, or skip the cancelled occurrence.</summary>
+    /// <exception cref="InvalidOperationException">It isn't in the calendar, or didn't come from its organiser.</exception>
+    public async Task ApplyCancellationAsync(IncomingScheduling cancel, IReadOnlyCollection<string> from)
+    {
+        var account = await ResolveAccountAsync() ?? throw new CalDavException("No calendar server is configured.");
+        var stored = await FindEventAsync(cancel.Uid) ?? throw new InvalidOperationException("This event isn't in your calendar.");
+        if (Scheduling.WhyNotFromOrganizer(cancel, stored.Raw, from) is { } why) throw new InvalidOperationException(why);
+        var match = stored.ETag != null ? new Dictionary<string, string> { ["If-Match"] = stored.ETag } : [];
+        if (cancel.RecurrenceId is { } occurrence)
+        {
+            var allDay = cancel.Event?.AllDay ?? false;
+            var updated = ICalendarWriter.ExcludeOccurrence(stored.Raw, occurrence, allDay);
+            var put = await SendResourceAsync(account, HttpMethod.Put, new Uri(stored.Href), updated, "text/calendar; charset=utf-8", match);
+            EnsureWriteSucceeded(put.Status, "event");
+            return;
+        }
+        var delete = await SendResourceAsync(account, HttpMethod.Delete, new Uri(stored.Href), null, null, match);
+        if (delete.Status != HttpStatusCode.NotFound) EnsureWriteSucceeded(delete.Status, "event");
+    }
+
+    /// <summary>Record a guest's emailed answer in a meeting the user organises. Returns the guest as they answered.</summary>
+    /// <exception cref="InvalidOperationException">The reply can't be applied; the message says why.</exception>
+    public async Task<EventAttendee> ApplyReplyAsync(IncomingScheduling reply, IReadOnlyCollection<string> from, IReadOnlyCollection<string> mine)
+    {
+        var account = await ResolveAccountAsync() ?? throw new CalDavException("No calendar server is configured.");
+        var stored = await FindEventAsync(reply.Uid) ?? throw new InvalidOperationException("This meeting isn't in your calendar any more.");
+        var (updated, guest) = Scheduling.ApplyReply(stored.Raw, reply, from, mine);
+        var put = await SendResourceAsync(account, HttpMethod.Put, new Uri(stored.Href), updated, "text/calendar; charset=utf-8",
+            stored.ETag != null ? new() { ["If-Match"] = stored.ETag } : []);
+        EnsureWriteSucceeded(put.Status, "event");
+        return guest;
+    }
+
     private Task<(string Raw, string? ETag)> FetchEventAsync(CalDavAccount account, Uri href) =>
         FetchObjectAsync(account, href, "event", "calendar");
 

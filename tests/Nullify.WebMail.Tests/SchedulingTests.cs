@@ -231,6 +231,143 @@ public class SchedulingTests
         StringAssert.Contains(text, "Carol, Finance <carol@example.org> (optional)");
     }
 
+    // ------------------------------------------------------------------ incoming
+
+    private static readonly string[] Guest = ["bob@example.org"];
+
+    [TestMethod]
+    public void RoundTrip_InviteAnswerAndRecordTheReply()
+    {
+        var stored = Invite();
+        var request = Scheduling.Read(Scheduling.ForSave(null, stored, Mine).Single().Ics, London)!;
+        Assert.AreEqual("REQUEST", request.Method);
+        Assert.AreEqual("m1", request.Uid);
+        Assert.AreEqual("Planning", request.Summary);
+
+        // Bob's side: the copy for his calendar has no METHOD; he accepts.
+        var copy = Scheduling.ForCalendar(request);
+        Assert.DoesNotContain("METHOD", copy);
+        var (_, reply) = Scheduling.Answer(copy, Guest, AttendeeStatus.Accepted);
+
+        // Back with the organiser.
+        var incoming = Scheduling.Read(reply.Ics, London)!;
+        Assert.AreEqual("REPLY", incoming.Method);
+        var (updated, guest) = Scheduling.ApplyReply(stored, incoming, ["bob@example.org"], Mine);
+        Assert.AreEqual(AttendeeStatus.Accepted, guest.Status);
+        var bob = ICalendar.ParseEvents(updated, London).Single().Attendees.Single(a => a.Email == "bob@example.org");
+        Assert.AreEqual(AttendeeStatus.Accepted, bob.Status);
+        Assert.AreEqual(AttendeeStatus.NeedsAction,
+            ICalendar.ParseEvents(updated, London).Single().Attendees.Single(a => a.Email == "carol@example.org").Status);
+    }
+
+    private const string BareReply = """
+        BEGIN:VCALENDAR
+        METHOD:REPLY
+        PRODID:-//Other//EN
+        VERSION:2.0
+        BEGIN:VEVENT
+        UID:m1
+        DTSTAMP:20261027T090000Z
+        SEQUENCE:0
+        ORGANIZER:mailto:simon@example.test
+        ATTENDEE;PARTSTAT=DECLINED:mailto:bob@example.org
+        END:VEVENT
+        END:VCALENDAR
+        """;
+
+    [TestMethod]
+    public void Reply_WithoutTimes_IsStillRead()
+    {
+        var reply = Scheduling.Read(BareReply, London)!;
+        Assert.IsNull(reply.Event);
+        Assert.AreEqual(AttendeeStatus.Declined, reply.Attendees.Single().Status);
+        var (updated, _) = Scheduling.ApplyReply(Invite(), reply, ["Bob@Example.org"], Mine);
+        StringAssert.Contains(updated, "PARTSTAT=DECLINED");
+    }
+
+    [TestMethod]
+    public void Reply_FromSomeoneElse_OrAboutAnotherMeeting_IsRefused()
+    {
+        var reply = Scheduling.Read(BareReply, London)!;
+        var spoofed = Assert.ThrowsExactly<InvalidOperationException>(() => Scheduling.ApplyReply(Invite(), reply, ["mallory@example.net"], Mine));
+        StringAssert.Contains(spoofed.Message, "bob@example.org");
+
+        var theirs = Invite().Replace("mailto:simon@example.test", "mailto:boss@example.org");
+        Assert.ThrowsExactly<InvalidOperationException>(() => Scheduling.ApplyReply(theirs, reply, ["bob@example.org"], Mine));
+
+        var stranger = Scheduling.Read(BareReply.Replace("bob@example.org", "eve@example.org"), London)!;
+        Assert.ThrowsExactly<InvalidOperationException>(() => Scheduling.ApplyReply(Invite(), stranger, ["eve@example.org"], Mine));
+    }
+
+    [TestMethod]
+    public void Reply_ToTimesTheMeetingNoLongerHas_IsOutOfDate()
+    {
+        var original = Invite();
+        var (_, reply) = Scheduling.Answer(Scheduling.ForCalendar(Scheduling.Read(Scheduling.ForSave(null, original, Mine).Single().Ics, London)!),
+            Guest, AttendeeStatus.Accepted);
+        var moved = ICalendarWriter.UpdateMaster(original, Meeting("Planning", Bob, Carol), Timed(5, 9), null, false);
+
+        var ex = Assert.ThrowsExactly<InvalidOperationException>(() =>
+            Scheduling.ApplyReply(moved, Scheduling.Read(reply.Ics, London)!, Guest, Mine));
+        StringAssert.Contains(ex.Message, "earlier version");
+    }
+
+    [TestMethod]
+    public void Cancellation_MustComeFromTheStoredOrganiser()
+    {
+        var cancel = Scheduling.Read(Scheduling.ForDelete(Invite(), null, false, Mine).Single().Ics, London)!;
+        Assert.AreEqual("CANCEL", cancel.Method);
+        Assert.IsFalse(cancel.ForOccurrence);
+        var bobsCopy = Scheduling.ForCalendar(Scheduling.Read(Scheduling.ForSave(null, Invite(), Mine).Single().Ics, London)!);
+
+        Assert.IsNull(Scheduling.WhyNotFromOrganizer(cancel, bobsCopy, ["Simon@example.test"]));
+        StringAssert.Contains(Scheduling.WhyNotFromOrganizer(cancel, bobsCopy, ["mallory@example.net"])!, "wasn't sent by the organiser");
+        var someoneElses = bobsCopy.Replace("mailto:simon@example.test", "mailto:boss@example.org");
+        StringAssert.Contains(Scheduling.WhyNotFromOrganizer(cancel, someoneElses, ["simon@example.test"])!, "organised by");
+    }
+
+    [TestMethod]
+    public void OccurrenceCancellation_SaysWhichOccurrence()
+    {
+        var series = ICalendarWriter.NewEvent("s1", Meeting("Standup", Bob) with { Repeat = EventRepeat.Weekly }, Timed(3, 9), "FREQ=WEEKLY");
+        var occurrence = new DateTimeOffset(2026, 11, 10, 9, 0, 0, TimeSpan.Zero);
+        var cancel = Scheduling.Read(Scheduling.ForDelete(series, occurrence, false, Mine).Single().Ics, London)!;
+        Assert.IsTrue(cancel.ForOccurrence);
+        Assert.AreEqual(occurrence, cancel.RecurrenceId);
+
+        var after = ICalendarWriter.ExcludeOccurrence(series, cancel.RecurrenceId!.Value, false);
+        var left = ICalendar.Expand(ICalendar.ParseEvents(after, London), occurrence.AddDays(-1), occurrence.AddDays(1));
+        Assert.HasCount(0, left);
+    }
+
+    [TestMethod]
+    public void PlainCalendarFile_IsNotAnInvitation()
+    {
+        Assert.IsNull(Scheduling.Read(Invite(), London));
+        Assert.IsNull(Scheduling.Read(BareReply.Replace("METHOD:REPLY", "METHOD:PUBLISH"), London));
+    }
+
+    [TestMethod]
+    public void InvitationEmail_IsFound_AndItsCalendarPartIsNotListedAsAFile()
+    {
+        var m = Scheduling.ForSave(null, Invite(), Mine).Single();
+        var req = new SendRequest("simon@example.test", ["bob@example.org"], null, null, "Invitation", "Text", null, null,
+            false, false, null, Attachments: [new OutgoingAttachment("invite.ics", "application/ics", Encoding.UTF8.GetBytes(m.Ics))],
+            Calendar: new CalendarPart(m.Method, m.Ics));
+        var parsed = MimeParser.Parse(Encoding.ASCII.GetBytes(MailService.BuildMimeMessage(req, "simon@example.test")));
+
+        var found = MailService.FindScheduling(parsed);
+        Assert.IsNotNull(found);
+        Assert.AreEqual("m1", Scheduling.Read(found, London)?.Uid);
+        Assert.HasCount(1, parsed.Attachments.Where(a => !a.IsInline)); // just the invite.ics attachment
+
+        // An .ics attachment alone (some clients send only that) is found too.
+        var attachedOnly = MimeParser.Parse(Encoding.ASCII.GetBytes(MailService.BuildMimeMessage(req with { Calendar = null }, "simon@example.test")));
+        Assert.IsNotNull(MailService.FindScheduling(attachedOnly));
+        Assert.IsNull(MailService.FindScheduling(MimeParser.Parse(Encoding.ASCII.GetBytes(
+            MailService.BuildMimeMessage(req with { Calendar = null, Attachments = null }, "simon@example.test")))));
+    }
+
     [TestMethod]
     public void InvitationEmail_CarriesTheCalendarAsAnAlternative()
     {

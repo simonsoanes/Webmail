@@ -921,6 +921,22 @@ select.compact { width: auto; }
 .guest-optional { flex: none; border: 1px solid var(--border); background: transparent; color: var(--muted); border-radius: 999px; padding: .1rem .55rem; font-size: .74rem; cursor: pointer; }
 .guest-optional.on { background: var(--surface-3); color: var(--text-2); }
 .guest-optional:hover { border-color: var(--border-strong); color: var(--text); }
+.invite-card { display: flex; gap: .9rem; align-items: flex-start; padding: .85rem 1rem; margin-bottom: 1rem; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius-sm); background: var(--surface-2); font-size: .86rem; }
+.invite-card.cancelled { border-left-color: var(--danger); }
+.invite-card.cancelled .invite-title { text-decoration: line-through; text-decoration-color: var(--faint); }
+.invite-date { flex: none; width: 52px; display: flex; flex-direction: column; align-items: center; padding: .3rem 0; border-radius: var(--radius-sm); background: var(--surface); border: 1px solid var(--border); color: var(--text-2); line-height: 1.1; }
+.invite-date .month { font-size: .66rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--accent); }
+.invite-card.cancelled .invite-date .month { color: var(--danger); }
+.invite-date .day { font-size: 1.35rem; font-weight: 700; color: var(--text); }
+.invite-date .weekday { font-size: .68rem; color: var(--muted); }
+.invite-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .2rem; }
+.invite-kind { font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.invite-title { font-size: 1rem; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.invite-when, .invite-where { color: var(--text-2); }
+.invite-status { margin-top: .3rem; color: var(--text-2); display: flex; align-items: center; gap: .4rem; }
+.invite-status.err { color: var(--err-text); }
+.invite-actions { margin-top: .45rem; display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.invite-actions select { height: 32px; max-width: 220px; }
 .agenda-guests { display: flex; flex-direction: column; gap: .25rem; }
 .rsvp { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
 .rsvp > span { font-weight: 600; color: var(--text-2); margin-right: .2rem; }

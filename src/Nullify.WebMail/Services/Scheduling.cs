@@ -21,7 +21,7 @@ public sealed record SchedulingMessage(
 /// and builds them. Only meetings the user organises send anything; guests answer with
 /// <see cref="Reply"/>. Alarms never leave the user's own copy.
 /// </summary>
-public static class Scheduling
+public static partial class Scheduling
 {
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
@@ -320,7 +320,8 @@ public static class Scheduling
 
     private static string Person(EventAttendee a) => string.IsNullOrWhiteSpace(a.Name) ? a.Email : $"{a.Name} <{a.Email}>";
 
-    private static string When(ICalEvent ev, TimeZoneInfo zone)
+    /// <summary>"Tue 3 Nov 2026, 09:00 – 10:00 (Europe/London)", or the dates of an all-day event.</summary>
+    public static string When(ICalEvent ev, TimeZoneInfo zone)
     {
         if (ev.AllDay)
         {

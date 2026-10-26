@@ -29,12 +29,14 @@ public sealed record MessageSummary(
 public sealed record MessagePage(IReadOnlyList<MessageSummary> Messages, int Total, int Page, int PageSize,
     IReadOnlyList<string>? Keywords = null, bool CanCreateKeywords = false);
 
+/// <param name="Scheduling">The invitation, cancellation or reply the message carries (its iTIP calendar), if any.</param>
 public sealed record MessageContent(
     string Source, string? HtmlBody, string? TextBody,
     IReadOnlyDictionary<string, string>? Headers = null,
     IReadOnlyList<AttachmentInfo>? Attachments = null,
     PgpMessageInfo? Pgp = null,
-    SenderAuthInfo? SenderAuth = null);
+    SenderAuthInfo? SenderAuth = null,
+    string? Scheduling = null);
 
 public enum SenderAuthVerdict { Verified, NotVerified }
 
