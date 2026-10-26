@@ -1,0 +1,153 @@
+@using Nullify.WebMail.Services
+@inject CalDavAccountService CalDav
+@inject AppState State
+
+@* Importing .ics files opened with the installed app (see file_handlers in the manifest). *@
+<div class="modal-backdrop" @onclick="Cancel">
+    <form class="modal ics-import" role="dialog" aria-modal="true" aria-labelledby="ics-heading"
+          @onclick:stopPropagation="true" @onsubmit="Import" @onsubmit:preventDefault="true">
+        <div class="modal-head">
+            <h3 id="ics-heading">Import @(events.Count == 1 ? "event" : "events")</h3>
+            <span class="spacer"></span>
+            <button type="button" class="icon-btn" @onclick="Cancel" title="Close"><Icon Name="x" /></button>
+        </div>
+
+        <div class="modal-body">
+            <p class="ics-files">@string.Join(", ", Files.Select(f => f.Name))</p>
+
+            @if (events.Count == 0)
+            {
+                <div class="notice"><Icon Name="calendar" Size="16" /><span>There are no events in @(Files.Count == 1 ? "this file" : "these files").</span></div>
+            }
+            else
+            {
+                <ul class="ics-events">
+                    @foreach (var ev in events.Take(MaxShown))
+                    {
+                        <li>
+                            <strong>@(string.IsNullOrWhiteSpace(ev.Summary) ? "(No title)" : ev.Summary)</strong>
+                            <span class="muted">@When(ev)@(ev.RRule != null ? " · repeats" : "")</span>
+                        </li>
+                    }
+                </ul>
+                @if (events.Count > MaxShown)
+                {
+                    <p class="muted">and @(events.Count - MaxShown) more</p>
+                }
+            }
+
+            @if (calendars == null)
+            {
+                @if (error == null) { <p class="muted"><span class="spinner"></span> Finding your calendars…</p> }
+            }
+            else if (calendars.Count > 0 && events.Count > 0)
+            {
+                <div class="field">
+                    <label for="ics-cal">Add to calendar</label>
+                    <select id="ics-cal" @bind="calendarId">
+                        @foreach (var c in calendars) { <option value="@c.Id">@c.Name</option> }
+                    </select>
+                </div>
+            }
+
+            @if (error != null)
+            {
+                <div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@error</div></div>
+            }
+        </div>
+
+        <div class="modal-foot">
+            <span class="spacer"></span>
+            <button type="button" class="btn" @onclick="Cancel" disabled="@busy">Cancel</button>
+            @if (events.Count > 0 && calendars is { Count: > 0 })
+            {
+                <button type="submit" class="btn accent" disabled="@busy">@if (busy) { <span class="spinner"></span> } Import</button>
+            }
+        </div>
+    </form>
+</div>
+
+@code {
+    private const int MaxShown = 8;
+    private static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+
+    [Parameter] public IReadOnlyList<(string Name, string Text)> Files { get; set; } = [];
+    /// <summary>Called with true once events were imported, false when the dialog was dismissed.</summary>
+    [Parameter] public EventCallback<bool> OnClose { get; set; }
+
+    private List<ICalEvent> events = [];
+    private IReadOnlyList<CalendarInfo>? calendars;
+    private string calendarId = "";
+    private string? error;
+    private bool busy;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // The series masters only; overrides travel with them.
+        events = Files.SelectMany(f => ICalendar.ParseEvents(f.Text, State.TimeZone))
+            .Where(e => e.RecurrenceIdWall == null).OrderBy(e => e.Start).ToList();
+        try
+        {
+            calendars = await CalDav.GetCalendarsAsync();
+            if (calendars == null) error = "No calendar server is set up for your account. Set up CalDAV in Settings, then open the file again.";
+            else if (calendars.Count == 0) error = "Your calendar server has no calendars to import into.";
+            else calendarId = calendars[0].Id;
+        }
+        catch (InvalidOperationException)
+        {
+            error = "Your saved CalDAV password needs to be entered again in Settings before events can be imported.";
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException)
+        {
+            error = $"Couldn't reach your calendar: {(ex is TaskCanceledException ? "the server did not respond in time." : ex.Message)}";
+        }
+    }
+
+    private string When(ICalEvent ev)
+    {
+        if (ev.AllDay)
+        {
+            var last = ev.EndWall.Date.AddDays(-1);
+            return last > ev.StartWall.Date
+                ? $"{ev.StartWall.ToString("ddd d MMM yyyy", Inv)} – {last.ToString("ddd d MMM yyyy", Inv)}"
+                : ev.StartWall.ToString("ddd d MMM yyyy", Inv);
+        }
+        var start = TimeZoneInfo.ConvertTime(ev.Start, State.TimeZone);
+        var end = TimeZoneInfo.ConvertTime(ev.End, State.TimeZone);
+        return start.Date == end.Date
+            ? $"{start.ToString("ddd d MMM yyyy, HH:mm", Inv)}–{end.ToString("HH:mm", Inv)}"
+            : $"{start.ToString("ddd d MMM yyyy, HH:mm", Inv)} – {end.ToString("ddd d MMM yyyy, HH:mm", Inv)}";
+    }
+
+    private async Task Import()
+    {
+        if (busy || string.IsNullOrEmpty(calendarId)) return;
+        busy = true;
+        error = null;
+        int added = 0, existing = 0;
+        try
+        {
+            foreach (var file in Files)
+            {
+                var (a, e) = await CalDav.ImportEventsAsync(file.Text, calendarId);
+                added += a;
+                existing += e;
+            }
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException or InvalidOperationException)
+        {
+            busy = false;
+            error = (added > 0 ? $"{Count(added)} imported, then: " : "") +
+                    (ex is TaskCanceledException ? "the server did not respond in time." : ex.Message);
+            return;
+        }
+        State.ShowToast(existing == 0 ? $"{Count(added)} imported"
+            : added == 0 ? (existing == 1 ? "That event is already in your calendar" : "Those events are already in your calendar")
+            : $"{Count(added)} imported, {existing} already in your calendar");
+        await OnClose.InvokeAsync(added > 0);
+    }
+
+    private static string Count(int n) => n == 1 ? "1 event" : $"{n} events";
+
+    private Task Cancel() => busy ? Task.CompletedTask : OnClose.InvokeAsync(false);
+}

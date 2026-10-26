@@ -61,6 +61,12 @@ public class BasicIntegrationTests
             Assert.AreEqual(System.Net.HttpStatusCode.OK, (await client.GetAsync("/" + icon.GetProperty("src").GetString())).StatusCode);
         Assert.AreEqual(System.Net.HttpStatusCode.OK, (await client.GetAsync("/sw.js")).StatusCode);
         Assert.AreEqual(System.Net.HttpStatusCode.OK, (await client.GetAsync("/offline.html")).StatusCode);
+
+        // Calendar files can be opened with the installed app.
+        var handler = root.GetProperty("file_handlers").EnumerateArray().Single();
+        Assert.AreEqual("./", handler.GetProperty("action").GetString());
+        var extensions = handler.GetProperty("accept").GetProperty("text/calendar").EnumerateArray().Select(e => e.GetString()).ToList();
+        CollectionAssert.Contains(extensions, ".ics");
     }
 
     [TestMethod]

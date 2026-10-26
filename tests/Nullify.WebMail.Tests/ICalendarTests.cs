@@ -140,4 +140,85 @@ public class ICalendarTests
         Assert.AreEqual("Floating", shown.Single().Summary);
         Assert.AreEqual(Utc(2026, 7, 1, 8), shown.Single().Start); // floating → viewer's zone
     }
+
+    [TestMethod]
+    public void SplitForImport_OneResourcePerUid_WithItsZones_AndNoMethod()
+    {
+        var ics = """
+            BEGIN:VCALENDAR
+            VERSION:2.0
+            PRODID:-//Example//EN
+            METHOD:REQUEST
+            BEGIN:VTIMEZONE
+            TZID:Europe/London
+            BEGIN:STANDARD
+            DTSTART:19701025T020000
+            TZOFFSETFROM:+0100
+            TZOFFSETTO:+0000
+            END:STANDARD
+            END:VTIMEZONE
+            BEGIN:VTIMEZONE
+            TZID:America/New_York
+            BEGIN:STANDARD
+            DTSTART:19701101T020000
+            TZOFFSETFROM:-0400
+            TZOFFSETTO:-0500
+            END:STANDARD
+            END:VTIMEZONE
+            BEGIN:VEVENT
+            UID:series
+            DTSTART;TZID=Europe/Lon
+             don:20260701T093000
+            RRULE:FREQ=WEEKLY
+            SUMMARY:Weekly
+            BEGIN:VALARM
+            UID:alarm-not-event
+            TRIGGER:-PT15M
+            END:VALARM
+            END:VEVENT
+            BEGIN:VEVENT
+            UID:series
+            RECURRENCE-ID;TZID=Europe/London:20260708T093000
+            DTSTART;TZID=Europe/London:20260708T100000
+            SUMMARY:Weekly (moved)
+            END:VEVENT
+            BEGIN:VEVENT
+            DTSTART;VALUE=DATE:20260710
+            SUMMARY:No UID
+            END:VEVENT
+            BEGIN:VTODO
+            UID:todo
+            END:VTODO
+            END:VCALENDAR
+            """.ReplaceLineEndings("\r\n");
+
+        var parts = ICalendar.SplitForImport(ics);
+
+        Assert.AreEqual(2, parts.Count);
+        var (uid, series) = parts[0];
+        Assert.AreEqual("series", uid);
+        Assert.IsFalse(series.Contains("METHOD"));
+        Assert.IsTrue(series.Contains("PRODID:-//Example//EN"));
+        Assert.IsTrue(series.Contains("TZID:Europe/London"));
+        Assert.IsFalse(series.Contains("America/New_York"));
+        Assert.IsFalse(series.Contains("VTODO"));
+        Assert.IsTrue(series.Contains("DTSTART;TZID=Europe/Lon\r\n don:20260701T093000"), "folding is kept");
+        var events = ICalendar.ParseEvents(series, London);
+        Assert.AreEqual(2, events.Count);
+        Assert.AreEqual(1, events.Count(e => e.RecurrenceIdWall != null));
+        Assert.IsTrue(series.StartsWith("BEGIN:VCALENDAR\r\n") && series.EndsWith("END:VCALENDAR\r\n"));
+
+        var (freshUid, single) = parts[1];
+        Assert.IsTrue(Guid.TryParse(freshUid, out _));
+        Assert.AreEqual(freshUid, ICalendar.ParseEvents(single, London).Single().Uid);
+        Assert.IsFalse(single.Contains("VTIMEZONE"));
+    }
+
+    [TestMethod]
+    public void SplitForImport_AddsVersionAndProdId_WhenMissing()
+    {
+        var (_, ics) = ICalendar.SplitForImport("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:x\nDTSTART:20260701T090000Z\nEND:VEVENT\nEND:VCALENDAR\n").Single();
+        StringAssert.Contains(ics, "VERSION:2.0\r\n");
+        StringAssert.Contains(ics, "PRODID:");
+    }
 }

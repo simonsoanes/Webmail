@@ -54,7 +54,7 @@
                 </div>
                 @switch (State.ActiveTab)
                 {
-                    case "calendar": <CalendarView /> break;
+                    case "calendar": <CalendarView @key="calendarKey" /> break;
                     case "tasks": <TasksView /> break;
                     case "contacts": <ContactView /> break;
                     case "notes": <NotesView /> break;
@@ -91,6 +91,11 @@
         </div>
     }
 
+    @if (launchedFiles != null)
+    {
+        <IcsImport @key="launchedFiles" Files="launchedFiles" OnClose="CloseImport" />
+    }
+
     <div class="toasts" role="status" aria-live="polite">
         @foreach (var toast in State.Toasts)
         {
@@ -109,6 +114,8 @@
     private int composeKey;
     private DotNetObjectReference<Mail>? selfRef;
     private CancellationTokenSource? updateDebounce;
+    private List<(string Name, string Text)>? launchedFiles;
+    private int calendarKey;
 
     private string PageTitleText
     {
@@ -173,8 +180,38 @@
                 State.TimeZone = zone;
                 State.NotifyStateChanged();
             }
+            await TakeLaunchedFiles();
         }
         catch (JSDisconnectedException) { }
+    }
+
+    /// <summary>Calendar files opened with the installed app: offer to import them.</summary>
+    [JSInvokable]
+    public Task OnFilesLaunched() => InvokeAsync(TakeLaunchedFiles);
+
+    private async Task TakeLaunchedFiles()
+    {
+        var names = await JS.InvokeAsync<string[]>("nullifyApp.launchedFiles");
+        if (names.Length == 0) return;
+        var files = new List<(string Name, string Text)>(launchedFiles ?? []);
+        for (var i = 0; i < names.Length; i++)
+        {
+            var data = await JS.InvokeAsync<IJSStreamReference>("nullifyApp.launchedFile", i);
+            await using var stream = await data.OpenReadStreamAsync(maxAllowedSize: 4 * 1024 * 1024);
+            using var reader = new StreamReader(stream);
+            files.Add((names[i], await reader.ReadToEndAsync()));
+        }
+        await JS.InvokeVoidAsync("nullifyApp.clearLaunchedFiles");
+        launchedFiles = files;
+        StateHasChanged();
+    }
+
+    private void CloseImport(bool imported)
+    {
+        launchedFiles = null;
+        if (!imported) return;
+        calendarKey++;
+        SetTab("calendar");
     }
 
     private void OnComposeOpened() => composeKey++;

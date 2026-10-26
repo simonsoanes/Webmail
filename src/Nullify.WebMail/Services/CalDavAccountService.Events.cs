@@ -113,6 +113,31 @@ public sealed partial class CalDavAccountService
         return ICalendarWriter.RepeatOf(master?.RRule);
     }
 
+    /// <summary>The account's event calendars, or null when no calendar server is configured.</summary>
+    public async Task<IReadOnlyList<CalendarInfo>?> GetCalendarsAsync() =>
+        await DiscoveredAsync() is { } d ? d.Found.Collections.Where(c => c.Supports("VEVENT")).Select(c => c.Info).ToList() : null;
+
+    /// <summary>
+    /// Copy the events in an .ics file into a calendar, one resource per UID. Events the
+    /// calendar already holds are left as they are and counted in <c>Existing</c>.
+    /// </summary>
+    /// <exception cref="CalDavException">The server refused an event; earlier ones stay imported.</exception>
+    public async Task<(int Added, int Existing)> ImportEventsAsync(string ics, string calendarId)
+    {
+        var account = await ResolveAccountAsync() ?? throw new CalDavException("No calendar server is configured.");
+        var calendarUri = new Uri(calendarId.EndsWith('/') ? calendarId : calendarId + "/");
+        int added = 0, existing = 0;
+        foreach (var (uid, body) in ICalendar.SplitForImport(ics))
+        {
+            var put = await SendResourceAsync(account, HttpMethod.Put, new Uri(calendarUri, Uri.EscapeDataString(uid) + ".ics"),
+                body, "text/calendar; charset=utf-8", new() { ["If-None-Match"] = "*" });
+            if (put.Status == HttpStatusCode.PreconditionFailed) { existing++; continue; }
+            EnsureWriteSucceeded(put.Status, "event");
+            added++;
+        }
+        return (added, existing);
+    }
+
     private Task<(string Raw, string? ETag)> FetchEventAsync(CalDavAccount account, Uri href) =>
         FetchObjectAsync(account, href, "event", "calendar");
 

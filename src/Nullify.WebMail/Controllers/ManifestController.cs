@@ -44,5 +44,18 @@ public class ManifestController(BrandingService branding) : ControllerBase
             new { src = "icons/icon-maskable-512.png", sizes = "512x512", type = "image/png", purpose = "maskable" },
             new { src = "favicon.svg", sizes = "any", type = "image/svg+xml", purpose = "any" },
         },
+        // Once installed, the app can be chosen to open calendar files; app.js picks them up
+        // from the launch queue and offers to import them.
+        file_handlers = new object[]
+        {
+            new
+            {
+                action = "./",
+                name = "Calendar file",
+                accept = new Dictionary<string, string[]> { ["text/calendar"] = [".ics", ".ical", ".icalendar"] },
+                icons = new object[] { new { src = "icons/icon-192.png", sizes = "192x192", type = "image/png" } },
+                launch_type = "single-client",
+            },
+        },
     };
 }

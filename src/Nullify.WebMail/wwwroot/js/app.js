@@ -260,6 +260,9 @@ window.nullifyApp = (() => {
 
         confirm(message) { return window.confirm(message); },
 
+        /** Tell the mail page, if it is up, that files were opened with the app. */
+        notifyLaunchedFiles() { if (dotnet) dotnet.invokeMethodAsync('OnFilesLaunched'); },
+
         /** Keep a context menu opened at (x, y) inside the window; focus it when it first opens. */
         fitMenu(el, x, y, first) {
             if (!el) return;
@@ -273,6 +276,38 @@ window.nullifyApp = (() => {
             }
         },
     };
+})();
+
+// Calendar files opened with the installed app (the manifest's file_handlers). They wait in
+// sessionStorage, so they survive signing in first, until the mail page takes them.
+(() => {
+    const key = 'nullify.launchedFiles';
+    const maxBytes = 1024 * 1024;
+    const read = () => { try { return JSON.parse(sessionStorage.getItem(key) || '[]'); } catch { return []; } };
+    const write = (files) => { try { if (files.length) sessionStorage.setItem(key, JSON.stringify(files)); else sessionStorage.removeItem(key); } catch { } };
+
+    Object.assign(window.nullifyApp, {
+        /** Names of the files waiting to be imported. */
+        launchedFiles() { return read().map(f => f.name); },
+        /** One waiting file's contents, as bytes so they stream past the circuit's message size limit. */
+        launchedFile(i) { const f = read()[i]; return new TextEncoder().encode(f ? f.text : ''); },
+        clearLaunchedFiles() { write([]); },
+    });
+
+    if (!('launchQueue' in window)) return;
+    window.launchQueue.setConsumer(async (params) => {
+        if (!params.files || !params.files.length) return;
+        const files = read();
+        for (const handle of params.files) {
+            try {
+                const file = await handle.getFile();
+                if (file.size > maxBytes) continue;
+                files.push({ name: file.name, text: await file.text() });
+            } catch { /* unreadable: skip it */ }
+        }
+        write(files);
+        window.nullifyApp.notifyLaunchedFiles();
+    });
 })();
 
 // Installable as an app. The worker only shows an offline page; it caches no mail.
