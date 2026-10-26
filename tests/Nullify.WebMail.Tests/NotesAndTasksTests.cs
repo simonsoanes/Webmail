@@ -82,6 +82,53 @@ public class NotesAndTasksTests
         Assert.AreEqual("Only part", note.Description);
     }
 
+    [TestMethod]
+    public void NoteFiles_NamesFileAfterTitle_SafeOnAnyDesktop()
+    {
+        Assert.AreEqual("Plans 2026 a b.txt", NoteFiles.FileName(new NoteItem("u", "Plans: 2026 a/b?", "x", null, "c")));
+        Assert.AreEqual("Milk.txt", NoteFiles.FileName(new NoteItem("u", "", "\n Milk \nEggs", null, "c")));
+        Assert.AreEqual("Untitled.txt", NoteFiles.FileName(new NoteItem("u", "", "", null, "c")));
+        Assert.AreEqual("Note.txt", NoteFiles.FileName(new NoteItem("u", "...", "", null, "c")));
+        Assert.AreEqual("Body\n", NoteFiles.Content(new NoteItem("u", "T", "Body", null, "c")));
+    }
+
+    [TestMethod]
+    public void NoteFiles_ReadsTextFile_TitledAfterFileUnlessItIsTheFirstLine()
+    {
+        var titled = NoteFiles.Read("Shopping.txt", "Milk\r\nEggs\r\n", London).Single();
+        Assert.AreEqual(new NoteEdit("Shopping", "Milk\nEggs"), titled);
+
+        var untitled = NoteFiles.Read("Milk.md", "Milk\nEggs", London).Single();
+        Assert.AreEqual(new NoteEdit("", "Milk\nEggs"), untitled);
+
+        Assert.AreEqual("", NoteFiles.Read("Milk.txt", "Milk", London)[0].Title);
+        Assert.IsEmpty(NoteFiles.Read(".txt", "  \n", London));
+    }
+
+    [TestMethod]
+    public void NoteFiles_ReadsEveryJournalInAnIcsFile()
+    {
+        var ics = Ics("""
+            BEGIN:VJOURNAL
+            UID:a
+            SUMMARY:One
+            DESCRIPTION:First
+            END:VJOURNAL
+            BEGIN:VJOURNAL
+            UID:b
+            SUMMARY:Gone
+            STATUS:CANCELLED
+            END:VJOURNAL
+            BEGIN:VJOURNAL
+            UID:c
+            DESCRIPTION:Third
+            END:VJOURNAL
+            """);
+
+        var notes = NoteFiles.Read("export.ics", ics, London);
+        CollectionAssert.AreEqual(new[] { new NoteEdit("One", "First"), new NoteEdit("", "Third") }, notes.ToArray());
+    }
+
     // ------------------------------------------------------------------ tasks
 
     [TestMethod]

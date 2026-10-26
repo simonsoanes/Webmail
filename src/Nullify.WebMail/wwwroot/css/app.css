@@ -252,7 +252,7 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .nav-item.drop-before::before { top: -1px; }
 .nav-item.drop-after::after { bottom: -1px; }
-.nav-item.context, .msg-row.context { box-shadow: inset 0 0 0 1px var(--accent); }
+.nav-item.context, .msg-row.context, .note-row.context { box-shadow: inset 0 0 0 1px var(--accent); }
 /* Shift-click selects messages, not the text under the pointer. */
 .msg-row { user-select: none; }
 .folder-actions { display: none; gap: 2px; }

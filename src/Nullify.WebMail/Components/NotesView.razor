@@ -2,6 +2,7 @@
 @inject CalDavAccountService Dav
 @inject AppState State
 @inject IJSRuntime JS
+@inject PgpBrowser Pgp
 
 @* Notes are VJOURNALs on the CalDAV server. Same shape as Contacts: list | note, one at a time when narrow. *@
 <div class="contacts-shell">
@@ -15,6 +16,10 @@
                 <button class="icon-btn" @onclick="Refresh" title="Refresh" disabled="@loading"><Icon Name="refresh" Size="17" /></button>
                 @if (status == Status.Ready && list?.Collections.Count > 0)
                 {
+                    <label class="icon-btn file-picker" title="Load notes from text or .ics files">
+                        @if (importing) { <span class="spinner"></span> } else { <Icon Name="upload" Size="17" /> }
+                        <InputFile OnChange="Import" multiple accept="@NoteFiles.Accept" disabled="@importing" aria-label="Load notes from files" />
+                    </label>
                     <button class="btn accent small" @onclick="StartNew"><Icon Name="plus" Size="14" /> New</button>
                 }
             </div>
@@ -103,9 +108,11 @@
                         @foreach (var n in matches)
                         {
                             var note = n;
-                            <button class="note-row @(selected?.Href == note.Href && !creating ? "active" : "")" @onclick="() => Select(note)">
+                            <button class="note-row @(selected?.Href == note.Href && !creating ? "active" : "") @(ctxNote?.Href == note.Href ? "context" : "")"
+                                    @onclick="() => Select(note)"
+                                    @oncontextmenu="e => OpenContext(e, note)" @oncontextmenu:preventDefault="true">
                                 <span class="note-line">
-                                    <span class="note-title">@TitleOf(note)</span>
+                                    <span class="note-title">@NoteFiles.DisplayTitle(note)</span>
                                     <span class="note-date">@When(note.Modified)</span>
                                 </span>
                                 <span class="note-snippet">@Snippet(note)</span>
@@ -131,6 +138,7 @@
                     <span class="spacer"></span>
                     @if (!creating)
                     {
+                        <button class="icon-btn" @onclick="() => Download(selected!)" title="Save as a text file" disabled="@Dirty"><Icon Name="download" Size="16" /></button>
                         @if (confirmDelete)
                         {
                             <span class="delete-confirm">
@@ -172,6 +180,27 @@
     </div>
 </div>
 
+@if (ctxAt is { } at && ctxNote is { } cn)
+{
+    <ContextMenu X="at.X" Y="at.Y" OnClose="CloseContext">
+        <div class="menu-title">@NoteFiles.DisplayTitle(cn)</div>
+        <button class="menu-item" @onclick="() => FromContext(() => Select(cn))"><Icon Name="file-text" Size="16" /> <span>Open</span></button>
+        <button class="menu-item" @onclick="() => FromContext(() => Download(cn))"><Icon Name="download" Size="16" /> <span>Save as text file</span></button>
+        <button class="menu-item" @onclick="() => FromContext(() => Duplicate(cn))" disabled="@busy"><Icon Name="plus" Size="16" /> <span>Duplicate</span></button>
+        @if (list?.Collections.Count > 1)
+        {
+            <div class="menu-sep"></div>
+            @foreach (var c in list.Collections.Where(c => c.Id != cn.CollectionId))
+            {
+                var target = c;
+                <button class="menu-item" @onclick="() => FromContext(() => MoveTo(cn, target))" disabled="@busy"><Icon Name="folder-input" Size="16" /> <span>Move to @target.Name</span></button>
+            }
+        }
+        <div class="menu-sep"></div>
+        <button class="menu-item danger" @onclick="() => FromContext(() => DeleteFromMenu(cn))" disabled="@busy"><Icon Name="trash" Size="16" /> <span>Delete note</span></button>
+    </ContextMenu>
+}
+
 @code {
     private enum Status { Loading, Ready, NotConfigured, NeedsReentry, Error }
 
@@ -184,8 +213,13 @@
     private string? collection;
     private Status status = Status.Loading;
     private string? error, editError;
-    private bool loading;
+    private bool loading, importing;
     private ElementReference titleInput;
+    // The right-click menu: where, and for which note.
+    private (double X, double Y)? ctxAt;
+    private NoteItem? ctxNote;
+
+    private const int MaxNoteFileBytes = 1024 * 1024;
 
     // editor
     private string title = "", body = "", collectionId = "";
@@ -354,6 +388,147 @@
         }
     }
 
+    // ---- right-click menu ----
+
+    private void OpenContext(MouseEventArgs e, NoteItem note)
+    {
+        ctxNote = note;
+        ctxAt = (e.ClientX, e.ClientY);
+    }
+
+    private void CloseContext()
+    {
+        ctxAt = null;
+        ctxNote = null;
+    }
+
+    private async Task FromContext(Func<Task> action)
+    {
+        CloseContext();
+        await action();
+    }
+
+    /// <summary>Fetch the list again, keeping the open note open (found by URL, or by UID after a move).</summary>
+    private async Task Reload(NoteItem? reselect = null)
+    {
+        list = await Dav.GetNotesAsync(State.TimeZone);
+        if (reselect != null && list?.Notes.FirstOrDefault(n => n.Uid == reselect.Uid) is { } moved) Edit(moved);
+        else if (selected != null) selected = list?.Notes.FirstOrDefault(n => n.Href == selected.Href);
+    }
+
+    private async Task Duplicate(NoteItem note)
+    {
+        busy = true;
+        try
+        {
+            var href = await Dav.SaveNoteAsync(null, new NoteEdit(note.Title.Length > 0 ? $"{note.Title} (copy)" : "", note.Body), note.CollectionId);
+            State.ShowToast("Note duplicated");
+            await Reload();
+            if (!Dirty && list?.Notes.FirstOrDefault(n => n.Href == href) is { } copy) Edit(copy);
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            State.ShowToast($"Couldn't duplicate the note: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task MoveTo(NoteItem note, CalendarInfo target)
+    {
+        var open = note.Href == selected?.Href && !creating;
+        if (open && !await ConfirmDiscard()) return;
+        busy = true;
+        try
+        {
+            await Dav.SaveNoteAsync(note, new NoteEdit(note.Title, note.Body), target.Id);
+            State.ShowToast($"Note moved to {target.Name}");
+            await Reload(open ? note : null);
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            State.ShowToast($"Couldn't move the note: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task DeleteFromMenu(NoteItem note)
+    {
+        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Delete \"{NoteFiles.DisplayTitle(note)}\"? This can't be undone.")) return;
+        if (note.Href == selected?.Href && !creating) { await Delete(); return; }
+        busy = true;
+        try
+        {
+            await Dav.DeleteNoteAsync(note);
+            State.ShowToast("Note deleted");
+            await Reload();
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            State.ShowToast($"Couldn't delete: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    // ---- files ----
+
+    private Task Download(NoteItem note) =>
+        Pgp.DownloadAsync(NoteFiles.FileName(note), System.Text.Encoding.UTF8.GetBytes(NoteFiles.Content(note)), "text/plain;charset=utf-8");
+
+    private async Task Import(InputFileChangeEventArgs e)
+    {
+        var files = e.GetMultipleFiles(50);
+        var target = collection ?? list?.Collections.FirstOrDefault()?.Id;
+        if (files.Count == 0 || importing || target == null) return;
+        importing = true;
+        string? lastHref = null;
+        var added = 0;
+        var problems = new List<string>();
+        try
+        {
+            foreach (var f in files)
+            {
+                if (f.Size > MaxNoteFileBytes) { problems.Add($"\"{f.Name}\" is larger than {MailFormat.Size(MaxNoteFileBytes)}"); continue; }
+                try
+                {
+                    using var reader = new StreamReader(f.OpenReadStream(MaxNoteFileBytes));
+                    var notes = NoteFiles.Read(f.Name, await reader.ReadToEndAsync(), State.TimeZone);
+                    if (notes.Count == 0) { problems.Add($"\"{f.Name}\" has no notes in it"); continue; }
+                    foreach (var n in notes)
+                    {
+                        lastHref = await Dav.SaveNoteAsync(null, n, target);
+                        added++;
+                    }
+                }
+                catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException or IOException)
+                {
+                    problems.Add($"\"{f.Name}\": {ex.Message}");
+                }
+            }
+            if (added > 0) State.ShowToast(added == 1 ? "Note loaded" : $"{added} notes loaded");
+            if (problems.Count > 0) State.ShowToast($"Couldn't load {string.Join("; ", problems.Take(3))}{(problems.Count > 3 ? $" and {problems.Count - 3} more" : "")}.", isError: true);
+            if (added == 0) return;
+            await Reload();
+            if (added == 1 && !Dirty && list?.Notes.FirstOrDefault(n => n.Href == lastHref) is { } loaded) Edit(loaded);
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException)
+        {
+            State.ShowToast($"Couldn't refresh your notes: {ex.Message}", isError: true);
+        }
+        finally
+        {
+            importing = false;
+        }
+    }
+
     private IEnumerable<NoteItem> Filtered()
     {
         IEnumerable<NoteItem> all = list?.Notes ?? [];
@@ -365,9 +540,6 @@
             || n.Body.Contains(q, StringComparison.CurrentCultureIgnoreCase)
             || n.Categories.Any(c => c.Contains(q, StringComparison.CurrentCultureIgnoreCase)));
     }
-
-    private static string TitleOf(NoteItem n) =>
-        n.Title.Length > 0 ? n.Title : n.Body.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() is { Length: > 0 } first ? first : "Untitled";
 
     private static string Snippet(NoteItem n)
     {
