@@ -2,21 +2,30 @@
 @inject CalDavAccountService CalDav
 @inject ApiService Api
 @inject AppState State
+@inject IJSRuntime JS
+@implements IDisposable
 
-<div class="calendar-page">
+<div class="calendar-page" @ref="pageEl" @onkeydown="OnKey" tabindex="-1">
     <div class="page-head">
-        <h2>@currentMonth.ToString("MMMM yyyy", Inv)</h2>
+        <h2>@Title</h2>
         @if (loading) { <span class="spinner" style="color:var(--muted);" aria-label="Loading"></span> }
         <span class="spacer"></span>
         <button class="icon-btn" @onclick="Refresh" title="Refresh" disabled="@loading"><Icon Name="refresh" Size="17" /></button>
         <button class="btn small" @onclick="Today">Today</button>
         <span class="btn-group">
-            <button class="icon-btn" @onclick="() => Move(-1)" title="Previous month"><Icon Name="chevron-left" /></button>
-            <button class="icon-btn" @onclick="() => Move(1)" title="Next month"><Icon Name="chevron-right" /></button>
+            <button class="icon-btn" @onclick="() => Move(-1)" title="Previous @ViewNoun"><Icon Name="chevron-left" /></button>
+            <button class="icon-btn" @onclick="() => Move(1)" title="Next @ViewNoun"><Icon Name="chevron-right" /></button>
         </span>
-        @if (status == Status.Ready && calendars.Count > 0)
+        <span class="segmented cal-views" role="group" aria-label="View">
+            @foreach (var (v, label) in Views)
+            {
+                var choice = v;
+                <button class="@(view == choice ? "on" : "")" aria-pressed="@(view == choice)" @onclick="() => SetView(choice)">@label</button>
+            }
+        </span>
+        @if (status == Status.Ready && writable.Count > 0)
         {
-            <button class="btn accent small" @onclick="() => NewEvent(selectedDay)"><Icon Name="plus" Size="14" /> New event</button>
+            <button class="btn accent small" @onclick="NewFromHead"><Icon Name="plus" Size="14" /> New event</button>
         }
     </div>
 
@@ -27,6 +36,7 @@
                 <Icon Name="calendar" Size="16" />
                 <span>No calendar server is set up for your account.</span>
                 <span class="spacer"></span>
+                <button class="btn small" @onclick="() => subscribeOpen = true">Add an internet calendar</button>
                 <button class="btn small" @onclick="OpenSettings">Set up CalDAV</button>
             </div>
             break;
@@ -53,81 +63,177 @@
     <div class="cal-layout">
         @if (calendars.Count > 0)
         {
+            var own = calendars.Where(c => c.Kind == CalendarKind.Own).ToList();
+            var others = calendars.Where(c => c.Kind is CalendarKind.Shared or CalendarKind.Delegated).ToList();
+            var subscribed = calendars.Where(c => c.Kind == CalendarKind.Subscribed).ToList();
             <section class="cal-filters" aria-label="Calendars">
                 <div class="cal-filters-head">
                     <h3>Calendars</h3>
+                    <span class="spacer"></span>
                     @if (hidden.Count > 0)
                     {
                         <button class="link-btn" @onclick="ShowAll">Show all</button>
                     }
+                    <button class="icon-btn small" title="Add a public or internet calendar" @onclick="() => subscribeOpen = true"><Icon Name="plus" Size="15" /></button>
                 </div>
-                <div class="cal-filter-list">
-                    @foreach (var c in calendars)
-                    {
-                        var cal = c;
-                        var shown = !hidden.Contains(cal.Id);
-                        var count = CountIn(cal.Id);
-                        <button class="cal-filter @(shown ? "on" : "off")" style="--cal:@ColorOf(cal.Id)" role="switch" aria-checked="@shown"
-                                @onclick="() => ToggleCalendar(cal.Id)" title="@(shown ? "Hide" : "Show") @cal.Name">
-                            <span class="cal-check" aria-hidden="true"><Icon Name="check" Size="12" /></span>
-                            <span class="cal-name">@cal.Name</span>
-                            <span class="cal-count" title="@count event@(count == 1 ? "" : "s") this view">@count</span>
-                        </button>
-                    }
-                </div>
+                @if (own.Count > 0)
+                {
+                    <div class="cal-section">
+                        @if (others.Count > 0 || subscribed.Count > 0) { <h4>Mine</h4> }
+                        <div class="cal-filter-list">@foreach (var c in own) { @FilterRow(c) }</div>
+                    </div>
+                }
+                @if (others.Count > 0)
+                {
+                    <div class="cal-section">
+                        <h4>Shared with me</h4>
+                        <div class="cal-filter-list">@foreach (var c in others) { @FilterRow(c) }</div>
+                    </div>
+                }
+                @if (subscribed.Count > 0)
+                {
+                    <div class="cal-section">
+                        <h4>Subscribed</h4>
+                        <div class="cal-filter-list">@foreach (var c in subscribed) { @FilterRow(c) }</div>
+                    </div>
+                }
             </section>
         }
 
-        <div class="calendar-grid">
-            @foreach (var day in WeekdayNames)
-            {
-                <div class="calendar-header-cell">@day</div>
-            }
-            @foreach (var date in days)
-            {
-                var d = date;
-                var dayEvents = EventsOn(d);
-                <div class="calendar-cell @(d.Month == currentMonth.Month ? "" : "muted") @(d == today ? "today" : "") @(d == selectedDay ? "selected" : "")"
-                     @onclick="() => SelectDay(d)" @ondblclick="() => NewEvent(d)" role="button" tabindex="0"
-                     aria-label="@d.ToString("dddd d MMMM", Inv), @dayEvents.Count event@(dayEvents.Count == 1 ? "" : "s")">
-                    <div class="cell-head">
-                        <span class="day-num">@d.Day</span>
-                        @if (status == Status.Ready && calendars.Count > 0)
+        @if (view == CalView.Month)
+        {
+            <div class="calendar-grid">
+                @foreach (var day in WeekdayNames)
+                {
+                    <div class="calendar-header-cell">@day</div>
+                }
+                @foreach (var date in days)
+                {
+                    var d = date;
+                    var dayEvents = EventsOn(d);
+                    var inRange = selection is { AllDay: true } r && r.End > r.Start && r.Contains(d);
+                    <div class="calendar-cell @(d.Month == currentMonth.Month ? "" : "muted") @(d == today ? "today" : "") @(d == selectedDay ? "selected" : "") @(inRange ? "in-range" : "")"
+                         data-day="@Key(d)" @onclick="e => SelectDay(d, e)" @ondblclick="() => NewEvent(d)" role="button" tabindex="0"
+                         aria-label="@d.ToString("dddd d MMMM", Inv), @dayEvents.Count event@(dayEvents.Count == 1 ? "" : "s")">
+                        <div class="cell-head">
+                            <span class="day-num">@d.Day</span>
+                            @if (status == Status.Ready && writable.Count > 0)
+                            {
+                                <button class="cell-add" title="Add an event on @d.ToString("d MMMM", Inv)"
+                                        @onclick="() => NewEvent(d)" @onclick:stopPropagation="true"><Icon Name="plus" Size="13" /></button>
+                            }
+                        </div>
+                        <div class="cell-events">
+                            @foreach (var ev in dayEvents.Take(MaxChips))
+                            {
+                                @Chip((d, ev))
+                            }
+                            @if (dayEvents.Count > MaxChips)
+                            {
+                                <span class="ev-more">+@(dayEvents.Count - MaxChips) more</span>
+                            }
+                        </div>
+                        @if (dayEvents.Count > 0)
                         {
-                            <button class="cell-add" title="Add an event on @d.ToString("d MMMM", Inv)"
-                                    @onclick="() => NewEvent(d)" @onclick:stopPropagation="true"><Icon Name="plus" Size="13" /></button>
+                            <span class="ev-dots" aria-hidden="true">
+                                @foreach (var ev in dayEvents.Take(4)) { <i style="--cal:@ColorOf(ev.CalendarId)"></i> }
+                            </span>
+                        }
+                        @if (inRange && DateOnly.FromDateTime(selection!.Value.End) == d)
+                        {
+                            @SelectionToolbar
                         }
                     </div>
-                    <div class="cell-events">
-                        @foreach (var ev in dayEvents.Take(MaxChips))
-                        {
-                            var item = ev;
-                            <button class="ev-chip @(item.AllDay ? "allday" : "")" style="--cal:@ColorOf(item.CalendarId)"
-                                    title="@ChipTitle(item)" @onclick="() => OpenEvent(d, item)" @ondblclick="() => EditEvent(item)"
-                                    @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">
-                                @if (!item.AllDay) { <span class="ev-time">@Local(item.Start).ToString("HH:mm")</span> }
-                                <span class="ev-title">@item.Summary</span>
-                            </button>
-                        }
-                        @if (dayEvents.Count > MaxChips)
-                        {
-                            <span class="ev-more">+@(dayEvents.Count - MaxChips) more</span>
-                        }
-                    </div>
-                    @if (dayEvents.Count > 0)
+                }
+            </div>
+        }
+        else
+        {
+            <div class="time-grid @(view == CalView.Day ? "one-day" : "")" style="--days:@days.Count">
+                <div class="tg-row tg-head">
+                    <div class="tg-gutter"></div>
+                    @foreach (var date in days)
                     {
-                        <span class="ev-dots" aria-hidden="true">
-                            @foreach (var ev in dayEvents.Take(4)) { <i style="--cal:@ColorOf(ev.CalendarId)"></i> }
-                        </span>
+                        var d = date;
+                        <button class="tg-dayhead @(d == today ? "today" : "") @(d == selectedDay ? "selected" : "")"
+                                title="@(view == CalView.Week ? "Show " + d.ToString("dddd d MMMM", Inv) : d.ToString("dddd d MMMM", Inv))"
+                                @onclick="() => OpenDay(d)">
+                            <span class="tg-dow">@d.ToString(view == CalView.Day ? "dddd" : "ddd", Inv)</span>
+                            <span class="day-num">@d.Day</span>
+                        </button>
                     }
                 </div>
-            }
-        </div>
+                <div class="tg-row tg-allday">
+                    <div class="tg-gutter">All day</div>
+                    @foreach (var date in days)
+                    {
+                        var d = date;
+                        var inRange = selection is { AllDay: true } r && r.Contains(d);
+                        <div class="tg-allday-cell @(inRange ? "in-range" : "")" data-day="@Key(d)" @onclick="() => SelectAllDay(d)"
+                             @ondblclick="NewFromSelection">
+                            @foreach (var ev in EventsOn(d).Where(e => !InGrid(e)))
+                            {
+                                @Chip((d, ev))
+                            }
+                            @if (inRange && DateOnly.FromDateTime(selection!.Value.End) == d)
+                            {
+                                @SelectionToolbar
+                            }
+                        </div>
+                    }
+                </div>
+                <div class="tg-scroll" @ref="scrollEl">
+                    <div class="tg-row tg-body" @ondblclick="NewFromSelection">
+                        <div class="tg-gutter tg-hours" aria-hidden="true">
+                            @for (var h = 1; h < 24; h++)
+                            {
+                                <span style="top:@Pct(h * 100.0 / 24)">@($"{h:00}:00")</span>
+                            }
+                        </div>
+                        @foreach (var date in days)
+                        {
+                            var d = date;
+                            var cut = selection is { AllDay: false } sel ? Clip(sel, d) : null;
+                            var lastSelected = cut != null && DateOnly.FromDateTime(selection!.Value.End.AddTicks(-1)) == d;
+                            <div class="tg-col @(d == today ? "today" : "")">
+                                @for (var slot = 0; slot < 48; slot++)
+                                {
+                                    <div class="tg-slot @(slot % 2 == 0 ? "hour" : "")" data-slot="@SlotKey(d, slot)"></div>
+                                }
+                                @if (cut is { } c)
+                                {
+                                    <div class="tg-sel" style="top:@Pct(c.Top);height:@Pct(c.Height)">
+                                        @if (lastSelected)
+                                        {
+                                            <div class="tg-sel-anchor @(c.Top + c.Height > 88 ? "above" : "") @(days.IndexOf(d) < days.Count / 2.0 ? "start" : "")">@SelectionToolbar</div>
+                                        }
+                                    </div>
+                                }
+                                @foreach (var p in CalendarLayout.Day(EventsOn(d).Where(InGrid), ev => (Local(ev.Start), Local(ev.End)), d))
+                                {
+                                    var item = p.Item;
+                                    <button class="tg-event @(openEvent == item ? "open" : "")"
+                                            style="--cal:@ColorOf(item.CalendarId);top:@Pct(p.Top);height:@Pct(p.Height);left:calc(@Pct(p.Column * 100.0 / p.Columns) + 1px);width:calc(@Pct(100.0 / p.Columns) - 3px)"
+                                            title="@ChipTitle(item)" @onclick="() => OpenEvent(d, item)" @ondblclick="() => EditEvent(item)" @ondblclick:stopPropagation="true">
+                                        <span class="ev-title">@item.Summary</span>
+                                        <span class="ev-time">@TimeRange(item, d)</span>
+                                    </button>
+                                }
+                                @if (d == today)
+                                {
+                                    <div class="tg-now" style="top:@Pct(NowMinutes / 14.4)" aria-hidden="true"></div>
+                                }
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        }
 
         <aside class="agenda" aria-label="Events on the selected day">
             <div class="agenda-header">
                 <h3>@selectedDay.ToString("dddd d MMMM", Inv)</h3>
-                @if (status == Status.Ready && calendars.Count > 0)
+                @if (status == Status.Ready && writable.Count > 0)
                 {
                     <button class="icon-btn small" title="Add an event on this day" @onclick="() => NewEvent(selectedDay)"><Icon Name="plus" Size="15" /></button>
                 }
@@ -173,7 +279,7 @@
                                             }
                                         </ul>
                                     </div>
-                                    @if (!IsMine(org.Email) && item.Attendees.FirstOrDefault(a => IsMine(a.Email)) is { } me && item.Href != null)
+                                    @if (!IsMine(org.Email) && item.Attendees.FirstOrDefault(a => IsMine(a.Email)) is { } me && CanEdit(item))
                                     {
                                         <div class="rsvp" role="group" aria-label="Your answer">
                                             <span>Going?</span>
@@ -190,9 +296,13 @@
                                 {
                                     <div class="msg-body-text">@((MarkupString)MailFormat.TextToHtml(item.Description))</div>
                                 }
-                                @if (item.Href != null)
+                                @if (CanEdit(item))
                                 {
                                     <div><button class="btn small" @onclick="() => EditEvent(item)"><Icon Name="pen" Size="14" /> Edit</button></div>
+                                }
+                                else if (Calendar(item.CalendarId) is { ReadOnly: true })
+                                {
+                                    <div class="muted"><Icon Name="lock" Size="12" Class="inline-icon" /> From a read-only calendar</div>
                                 }
                             </div>
                         }
@@ -205,29 +315,45 @@
 
 @if (editorOpen)
 {
-    <EventEditor @key="editorKey" Event="editing" Calendars="calendars" ColorOf="ColorOf"
-                 DefaultCalendarId="@DefaultCalendar" Day="editorDay" Zone="State.TimeZone" Senders="senders"
+    <EventEditor @key="editorKey" Event="editing" Calendars="writable" ColorOf="ColorOf"
+                 DefaultCalendarId="@DefaultCalendar" Day="editorDay" Slot="editorSlot" Zone="State.TimeZone" Senders="senders"
                  OnSave="SaveEvent" OnDelete="DeleteEvent" OnClose="CloseEditor" />
+}
+@if (subscribeOpen)
+{
+    <CalendarSubscribe OnAdded="Subscribed" OnClose="() => subscribeOpen = false" />
+}
+@if (sharing != null)
+{
+    <CalendarShare Calendar="sharing" Color="@ColorOf(sharing.Id)" OnClose="() => sharing = null" />
 }
 
 @code {
     private enum Status { Loading, Ready, NotConfigured, NeedsReentry, Error }
+    private enum CalView { Month, Week, Day }
 
     private static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
     private const int MaxChips = 3;
-    private const string HiddenPref = "calendar.hidden";
+    // The view is remembered; the days shown always start from today.
+    private const string HiddenPref = "calendar.hidden", ViewPref = "calendar.view", DelegatedPref = "calendar.delegated";
     private static readonly string[] WeekdayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    private static readonly (CalView, string)[] Views = [(CalView.Month, "Month"), (CalView.Week, "Week"), (CalView.Day, "Day")];
     // Used when a calendar doesn't publish its own colour.
     private static readonly string[] Palette = ["#3b5bdb", "#0ca678", "#e8590c", "#ae3ec9", "#1098ad", "#d6336c", "#5c940d", "#f08c00"];
 
+    private CalView view = CalView.Month;
     private DateOnly currentMonth;
     private DateOnly today;
     private DateOnly selectedDay;
     private readonly List<DateOnly> days = new();
     private IReadOnlyList<CalendarEvent> events = Array.Empty<CalendarEvent>();
     private IReadOnlyList<CalendarInfo> calendars = Array.Empty<CalendarInfo>();
+    private IReadOnlyList<CalendarInfo> writable = Array.Empty<CalendarInfo>();
+    private Dictionary<string, CalendarInfo> byId = new();
     private IReadOnlyList<string> partialErrors = Array.Empty<string>();
     private readonly HashSet<string> hidden = new();
+    // Delegators' calendars start off; these are the ones the user turned on.
+    private readonly HashSet<string> shownDelegated = new();
     private Dictionary<DateOnly, List<CalendarEvent>> byDay = new();
     private CalendarEvent? openEvent;
     private Status status = Status.Loading;
@@ -235,11 +361,22 @@
     private bool loading;
     private int loadToken;
 
+    // highlighted days or times
+    private CalendarSlot? selection;
+    private DotNetObjectReference<CalendarView>? selfRef;
+    private ElementReference pageEl, scrollEl;
+    private bool scrollPending = true;
+
     // editor
     private bool editorOpen;
     private CalendarEvent? editing;
     private DateOnly editorDay;
+    private CalendarSlot? editorSlot;
     private int editorKey;
+
+    // dialogs
+    private bool subscribeOpen;
+    private CalendarInfo? sharing;
 
     // meetings
     private IReadOnlyList<SenderIdentity> senders = [];
@@ -250,8 +387,9 @@
     /// <summary>The user's own addresses, which make them a meeting's organiser or one of its guests.</summary>
     private List<string> Mine => senders.Select(s => s.Email).ToList();
 
-    /// <summary>New events go to the first visible calendar.</summary>
-    private string? DefaultCalendar => calendars.FirstOrDefault(c => !hidden.Contains(c.Id))?.Id ?? calendars.FirstOrDefault()?.Id;
+    /// <summary>New events go to the first visible calendar of the user's own.</summary>
+    private string? DefaultCalendar =>
+        (writable.FirstOrDefault(c => c.Kind == CalendarKind.Own && IsShown(c)) ?? writable.FirstOrDefault(IsShown) ?? writable.FirstOrDefault())?.Id;
 
     protected override async Task OnInitializedAsync()
     {
@@ -260,22 +398,79 @@
         selectedDay = today;
         try
         {
-            var pref = (await Api.GetPreferencesAsync()).FirstOrDefault(p => p.Key == HiddenPref)?.Value;
-            if (!string.IsNullOrEmpty(pref)) hidden.UnionWith(pref.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+            var prefs = await Api.GetPreferencesAsync();
+            string? Pref(string key) => prefs.FirstOrDefault(p => p.Key == key)?.Value;
+            if (Pref(HiddenPref) is { Length: > 0 } h) hidden.UnionWith(h.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+            if (Pref(DelegatedPref) is { Length: > 0 } dl) shownDelegated.UnionWith(dl.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+            if (Enum.TryParse<CalView>(Pref(ViewPref), ignoreCase: true, out var v) && Enum.IsDefined(v)) view = v;
         }
-        catch { /* show everything */ }
+        catch { /* month view, everything shown */ }
         try { senders = await Api.GetSendersAsync(); }
         catch { /* no organising meetings, but the calendar still works */ }
         BuildGrid();
         await Load();
     }
 
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        try
+        {
+            if (firstRender)
+            {
+                selfRef = DotNetObjectReference.Create(this);
+                await JS.InvokeVoidAsync("nullifyApp.calendarSelect", pageEl, selfRef);
+            }
+            if (scrollPending && view != CalView.Month)
+            {
+                // Start at the working day, or just before now when today is on screen.
+                scrollPending = false;
+                var at = days.Contains(today) ? Math.Max(0, NowMinutes - 90) : 7 * 60 + 30;
+                await JS.InvokeVoidAsync("nullifyApp.scrollCalendarTo", scrollEl, at);
+            }
+        }
+        catch { /* circuit gone */ }
+    }
+
+    public void Dispose() => selfRef?.Dispose();
+
     private void BuildGrid()
     {
         days.Clear();
-        var start = currentMonth.AddDays(-(((int)currentMonth.DayOfWeek + 6) % 7)); // Monday start
-        for (var i = 0; i < 42; i++) days.Add(start.AddDays(i));
+        switch (view)
+        {
+            case CalView.Month:
+                var start = currentMonth.AddDays(-(((int)currentMonth.DayOfWeek + 6) % 7)); // Monday start
+                for (var i = 0; i < 42; i++) days.Add(start.AddDays(i));
+                break;
+            case CalView.Week:
+                var monday = selectedDay.AddDays(-(((int)selectedDay.DayOfWeek + 6) % 7));
+                for (var i = 0; i < 7; i++) days.Add(monday.AddDays(i));
+                break;
+            default:
+                days.Add(selectedDay);
+                break;
+        }
     }
+
+    private string Title => view switch
+    {
+        CalView.Month => currentMonth.ToString("MMMM yyyy", Inv),
+        CalView.Day => selectedDay.ToString("dddd d MMMM yyyy", Inv),
+        _ => days[0].Year != days[^1].Year ? $"{days[0].ToString("d MMM yyyy", Inv)} – {days[^1].ToString("d MMM yyyy", Inv)}"
+            : days[0].Month != days[^1].Month ? $"{days[0].ToString("d MMM", Inv)} – {days[^1].ToString("d MMM yyyy", Inv)}"
+            : $"{days[0].Day} – {days[^1].ToString("d MMMM yyyy", Inv)}",
+    };
+
+    private string ViewNoun => view.ToString().ToLowerInvariant();
+
+    /// <summary>Delegators' calendars are only read once the user turns them on.</summary>
+    private bool Fetched(CalendarInfo c) => c.Kind != CalendarKind.Delegated || shownDelegated.Contains(c.Id);
+
+    private bool IsShown(CalendarInfo c) => c.Kind == CalendarKind.Delegated ? shownDelegated.Contains(c.Id) : !hidden.Contains(c.Id);
+
+    private CalendarInfo? Calendar(string? id) => id != null && byId.TryGetValue(id, out var c) ? c : null;
+
+    private bool CanEdit(CalendarEvent ev) => ev.Href != null && Calendar(ev.CalendarId) is not { ReadOnly: true };
 
     private async Task Load()
     {
@@ -289,7 +484,7 @@
         var to = new DateTimeOffset(last, tz.GetUtcOffset(last));
         try
         {
-            var range = await CalDav.GetEventsAsync(from, to, tz);
+            var range = await CalDav.GetEventsAsync(from, to, tz, Fetched);
             if (token != loadToken) return;
             if (range == null)
             {
@@ -304,6 +499,8 @@
                 calendars = range.Calendars;
                 partialErrors = range.Errors;
             }
+            writable = calendars.Where(c => !c.ReadOnly).ToList();
+            byId = calendars.DistinctBy(c => c.Id).ToDictionary(c => c.Id);
         }
         catch (InvalidOperationException)
         {
@@ -330,7 +527,7 @@
     private void Index()
     {
         byDay = new();
-        foreach (var ev in events.Where(e => !hidden.Contains(e.CalendarId ?? "")))
+        foreach (var ev in events.Where(e => Calendar(e.CalendarId) is not { } c || IsShown(c)))
         {
             var (startDay, endDay) = DaysOf(ev);
             for (var d = startDay; d <= endDay && d <= days[^1]; d = d.AddDays(1))
@@ -364,10 +561,15 @@
 
     private List<CalendarEvent> EventsOn(DateOnly d) => byDay.TryGetValue(d, out var list) ? list : [];
 
-    /// <summary>Events from a calendar in the visible weeks (shown on its filter, even when hidden).</summary>
+    /// <summary>Timed events shorter than a day go on the time grid; the rest sit in the all-day row.</summary>
+    private static bool InGrid(CalendarEvent ev) => !ev.AllDay && ev.End - ev.Start < TimeSpan.FromHours(24);
+
+    /// <summary>Events from a calendar in the visible days (shown on its filter, even when hidden).</summary>
     private int CountIn(string calendarId) => events.Count(e => e.CalendarId == calendarId);
 
     private DateTime Local(DateTimeOffset t) => TimeZoneInfo.ConvertTime(t, State.TimeZone).DateTime;
+
+    private double NowMinutes => Local(DateTimeOffset.UtcNow).TimeOfDay.TotalMinutes;
 
     private string ColorOf(string? calendarId)
     {
@@ -376,7 +578,14 @@
         return calendars[index].Color ?? Palette[index % Palette.Length];
     }
 
-    private string CalendarName(string? id) => calendars.FirstOrDefault(c => c.Id == id)?.Name ?? "Calendar";
+    private string CalendarName(string? id) => Calendar(id)?.Name ?? "Calendar";
+
+    private static string Key(DateOnly d) => d.ToString("yyyy-MM-dd", Inv);
+
+    private static string SlotKey(DateOnly d, int slot) =>
+        d.ToDateTime(new TimeOnly(slot / 2, slot % 2 * 30)).ToString("yyyy-MM-dd'T'HH':'mm", Inv);
+
+    private static string Pct(double value) => value.ToString("0.###", Inv) + "%";
 
     private string TimeRange(CalendarEvent ev, DateOnly day)
     {
@@ -407,35 +616,184 @@
     private string ChipTitle(CalendarEvent ev) =>
         ev.Summary + (ev.AllDay ? "" : $" ({Local(ev.Start):HH:mm}–{Local(ev.End):HH:mm})") + (ev.Location != null ? $" · {ev.Location}" : "");
 
-    private void SelectDay(DateOnly d)
+    private RenderFragment<(DateOnly Day, CalendarEvent Event)> Chip => x =>
+        @<button class="ev-chip @(x.Event.AllDay ? "allday" : "")" style="--cal:@ColorOf(x.Event.CalendarId)"
+                 title="@ChipTitle(x.Event)" @onclick="() => OpenEvent(x.Day, x.Event)" @ondblclick="() => EditEvent(x.Event)"
+                 @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">
+            @if (!x.Event.AllDay) { <span class="ev-time">@Local(x.Event.Start).ToString("HH:mm")</span> }
+            <span class="ev-title">@x.Event.Summary</span>
+        </button>;
+
+    private RenderFragment<CalendarInfo> FilterRow => cal =>
+        @<div class="cal-filter-row">
+            <button class="cal-filter @(IsShown(cal) ? "on" : "off")" style="--cal:@ColorOf(cal.Id)" role="switch" aria-checked="@IsShown(cal)"
+                    @onclick="() => ToggleCalendar(cal)" title="@FilterTitle(cal)">
+                <span class="cal-check" aria-hidden="true"><Icon Name="check" Size="12" /></span>
+                <span class="cal-label">
+                    <span class="cal-name">@cal.Name</span>
+                    @if (Origin(cal) is { } origin) { <span class="cal-origin">@origin</span> }
+                </span>
+                @if (Fetched(cal))
+                {
+                    var count = CountIn(cal.Id);
+                    <span class="cal-count" title="@count event@(count == 1 ? "" : "s") this view">@count</span>
+                }
+            </button>
+            @if (cal.CanShare)
+            {
+                <button class="icon-btn small cal-action" title="Share @cal.Name" @onclick="() => sharing = cal"><Icon Name="users" Size="14" /></button>
+            }
+            @if (cal.Kind == CalendarKind.Subscribed)
+            {
+                <button class="icon-btn small cal-action" title="Remove @cal.Name" @onclick="() => Unsubscribe(cal)"><Icon Name="x" Size="14" /></button>
+            }
+        </div>;
+
+    private string FilterTitle(CalendarInfo c) => $"{(IsShown(c) ? "Hide" : "Show")} {c.Name}{(c.ReadOnly ? " (read-only)" : "")}";
+
+    /// <summary>Whose a calendar is, or where it comes from.</summary>
+    private static string? Origin(CalendarInfo c) => c.Kind switch
+    {
+        CalendarKind.Shared => c.OwnerName,
+        CalendarKind.Delegated => c.OwnerName is { } n ? $"{n} · delegate" : "As a delegate",
+        CalendarKind.Subscribed => Uri.TryCreate(c.Id.StartsWith(CalendarSubscription.FeedPrefix) ? c.Id[CalendarSubscription.FeedPrefix.Length..] : c.Id,
+            UriKind.Absolute, out var u) ? u.Host : null,
+        _ => null,
+    };
+
+    // ---- highlighting days and times ----
+
+    private RenderFragment SelectionToolbar =>
+        @<div class="sel-toolbar" role="toolbar" aria-label="Highlighted time" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">
+            <span class="sel-label">@SlotLabel(selection!.Value)</span>
+            <button class="btn accent small" @onclick="NewFromSelection"><Icon Name="plus" Size="14" /> New event</button>
+            <button class="icon-btn small" title="Clear" @onclick="() => selection = null"><Icon Name="x" Size="14" /></button>
+        </div>;
+
+    /// <summary>A drag across days or times, or a click on a time, reported by the browser (see calendarSelect).</summary>
+    [JSInvokable]
+    public Task OnCalendarRange(string kind, string from, string to) => InvokeAsync(() =>
+    {
+        if (status != Status.Ready || writable.Count == 0) return;
+        if (kind == "day")
+        {
+            if (!DateOnly.TryParseExact(from, "yyyy-MM-dd", Inv, System.Globalization.DateTimeStyles.None, out var a) ||
+                !DateOnly.TryParseExact(to, "yyyy-MM-dd", Inv, System.Globalization.DateTimeStyles.None, out var b)) return;
+            if (b < a) (a, b) = (b, a);
+            selection = new CalendarSlot(a.ToDateTime(TimeOnly.MinValue), b.ToDateTime(TimeOnly.MinValue), AllDay: true);
+            selectedDay = a;
+        }
+        else
+        {
+            const string format = "yyyy-MM-dd'T'HH':'mm";
+            if (!DateTime.TryParseExact(from, format, Inv, System.Globalization.DateTimeStyles.None, out var a) ||
+                !DateTime.TryParseExact(to, format, Inv, System.Globalization.DateTimeStyles.None, out var b)) return;
+            if (b < a) (a, b) = (b, a);
+            // A click picks an hour (to the end of the day at most); a drag covers the half hours it crossed.
+            var end = a == b ? (a.AddHours(1) < a.Date.AddDays(1) ? a.AddHours(1) : a.Date.AddDays(1)) : b.AddMinutes(30);
+            selection = new CalendarSlot(a, end, AllDay: false);
+            selectedDay = DateOnly.FromDateTime(a);
+        }
+        openEvent = null;
+        StateHasChanged();
+    });
+
+    /// <summary>The part of a timed selection on a day, as percentages of its height.</summary>
+    private static (double Top, double Height)? Clip(CalendarSlot s, DateOnly d)
+    {
+        var dayStart = d.ToDateTime(TimeOnly.MinValue);
+        var dayEnd = dayStart.AddDays(1);
+        var a = s.Start > dayStart ? s.Start : dayStart;
+        var b = s.End < dayEnd ? s.End : dayEnd;
+        if (b <= a) return null;
+        return ((a - dayStart).TotalMinutes / 14.4, (b - a).TotalMinutes / 14.4);
+    }
+
+    private static string SlotLabel(CalendarSlot s)
+    {
+        if (s.AllDay)
+        {
+            var a = DateOnly.FromDateTime(s.Start);
+            var b = DateOnly.FromDateTime(s.End);
+            if (a == b) return a.ToString("ddd d MMM", Inv);
+            return a.Month == b.Month && a.Year == b.Year
+                ? $"{a.ToString("ddd d", Inv)} – {b.ToString("ddd d MMM", Inv)}"
+                : $"{a.ToString("ddd d MMM", Inv)} – {b.ToString("ddd d MMM", Inv)}";
+        }
+        var end = s.End.TimeOfDay == TimeSpan.Zero ? "24:00" : s.End.ToString("HH:mm", Inv);
+        return s.Start.Date == s.End.AddTicks(-1).Date
+            ? $"{s.Start.ToString("ddd d MMM", Inv)}, {s.Start.ToString("HH:mm", Inv)}–{end}"
+            : $"{s.Start.ToString("ddd d MMM HH:mm", Inv)} – {s.End.ToString("ddd d MMM HH:mm", Inv)}";
+    }
+
+    private void OnKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") selection = null;
+    }
+
+    private void SelectDay(DateOnly d, MouseEventArgs e)
+    {
+        openEvent = null;
+        if (e.ShiftKey && writable.Count > 0 && d != selectedDay)
+        {
+            // Shift+click: from the selected day to this one.
+            var (a, b) = d < selectedDay ? (d, selectedDay) : (selectedDay, d);
+            selection = new CalendarSlot(a.ToDateTime(TimeOnly.MinValue), b.ToDateTime(TimeOnly.MinValue), AllDay: true);
+            return;
+        }
+        selectedDay = d;
+        selection = null;
+    }
+
+    private void SelectAllDay(DateOnly d)
     {
         selectedDay = d;
         openEvent = null;
+        selection = writable.Count > 0 ? new CalendarSlot(d.ToDateTime(TimeOnly.MinValue), d.ToDateTime(TimeOnly.MinValue), AllDay: true) : null;
     }
 
     private void OpenEvent(DateOnly d, CalendarEvent ev)
     {
         selectedDay = d;
         openEvent = ev;
+        selection = null;
     }
 
     // ---- editing ----
 
+    private void NewFromHead()
+    {
+        if (selection != null) NewFromSelection();
+        else NewEvent(selectedDay);
+    }
+
     private void NewEvent(DateOnly day)
     {
-        if (status != Status.Ready || calendars.Count == 0) return;
+        if (status != Status.Ready || writable.Count == 0) return;
         selectedDay = day;
         editing = null;
         editorDay = day;
+        editorSlot = null;
+        editorKey++;
+        editorOpen = true;
+    }
+
+    private void NewFromSelection()
+    {
+        if (selection is not { } slot || status != Status.Ready || writable.Count == 0) return;
+        editing = null;
+        editorDay = DateOnly.FromDateTime(slot.Start);
+        editorSlot = slot;
         editorKey++;
         editorOpen = true;
     }
 
     private void EditEvent(CalendarEvent ev)
     {
-        if (ev.Href == null) return;
+        if (!CanEdit(ev)) return;
         editing = ev;
         editorDay = DaysOf(ev).Start;
+        editorSlot = null;
         editorKey++;
         editorOpen = true;
     }
@@ -450,6 +808,7 @@
             var sent = notify ? await Notify(Scheduling.ForSave(before, after, Mine)) : 0;
             if (sent >= 0) State.ShowToast((editing == null ? "Event added" : "Event saved") + (sent > 0 ? " and guests emailed" : ""));
             editorOpen = false;
+            selection = null;
             // Show the day the event now starts on.
             var day = DateOnly.FromDateTime(edit.StartLocal);
             selectedDay = day;
@@ -459,6 +818,7 @@
                 BuildGrid();
             }
             hidden.Remove(calendarId);
+            if (Calendar(calendarId) is { Kind: CalendarKind.Delegated }) shownDelegated.Add(calendarId);
             await Load();
             StateHasChanged(); // invoked as a plain delegate from the editor, so re-render explicitly
             return null;
@@ -543,11 +903,21 @@
         finally { answering = false; }
     }
 
-    // ---- filters & navigation ----
+    // ---- calendars: filters, subscriptions ----
 
-    private async Task ToggleCalendar(string id)
+    private async Task ToggleCalendar(CalendarInfo cal)
     {
-        if (!hidden.Remove(id)) hidden.Add(id);
+        if (cal.Kind == CalendarKind.Delegated)
+        {
+            var on = shownDelegated.Add(cal.Id);
+            if (!on) shownDelegated.Remove(cal.Id);
+            try { await Api.SetPreferenceAsync(DelegatedPref, string.Join('\n', shownDelegated)); }
+            catch { /* cosmetic */ }
+            if (on) await Load(); // its events weren't read while it was off
+            else Index();
+            return;
+        }
+        if (!hidden.Remove(cal.Id)) hidden.Add(cal.Id);
         Index();
         await SaveHidden();
     }
@@ -565,12 +935,72 @@
         catch { /* cosmetic */ }
     }
 
-    private async Task Move(int months)
+    private async Task Subscribed(CalendarSubscription sub)
     {
-        currentMonth = currentMonth.AddMonths(months);
-        // Keep the agenda on the same day-of-month where possible.
-        selectedDay = new DateOnly(currentMonth.Year, currentMonth.Month, Math.Min(selectedDay.Day, DateTime.DaysInMonth(currentMonth.Year, currentMonth.Month)));
+        subscribeOpen = false;
+        hidden.Remove(sub.Id);
+        State.ShowToast($"Added {sub.Name}");
+        await Load();
+        StateHasChanged();
+    }
+
+    private async Task Unsubscribe(CalendarInfo cal)
+    {
+        try
+        {
+            if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Remove \"{cal.Name}\" from your calendars?")) return;
+            await CalDav.UnsubscribeAsync(cal.Id);
+            if (hidden.Remove(cal.Id)) await SaveHidden();
+            State.ShowToast($"Removed {cal.Name}");
+            await Load();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            State.ShowToast($"Couldn't remove it: {ex.Message}", isError: true);
+        }
+    }
+
+    // ---- navigation ----
+
+    private async Task SetView(CalView next)
+    {
+        if (next == view) return;
+        view = next;
+        currentMonth = new DateOnly(selectedDay.Year, selectedDay.Month, 1);
+        selection = null;
+        scrollPending = true;
+        BuildGrid();
+        try { await Api.SetPreferenceAsync(ViewPref, next.ToString().ToLowerInvariant()); }
+        catch { /* cosmetic */ }
+        await Load();
+    }
+
+    private async Task OpenDay(DateOnly d)
+    {
+        selectedDay = d;
         openEvent = null;
+        if (view == CalView.Week) await SetView(CalView.Day);
+    }
+
+    private async Task Move(int steps)
+    {
+        switch (view)
+        {
+            case CalView.Month:
+                currentMonth = currentMonth.AddMonths(steps);
+                // Keep the agenda on the same day-of-month where possible.
+                selectedDay = new DateOnly(currentMonth.Year, currentMonth.Month, Math.Min(selectedDay.Day, DateTime.DaysInMonth(currentMonth.Year, currentMonth.Month)));
+                break;
+            case CalView.Week:
+                selectedDay = selectedDay.AddDays(7 * steps);
+                break;
+            default:
+                selectedDay = selectedDay.AddDays(steps);
+                break;
+        }
+        currentMonth = new DateOnly(selectedDay.Year, selectedDay.Month, 1);
+        openEvent = null;
+        selection = null;
         BuildGrid();
         await Load();
     }
@@ -580,6 +1010,8 @@
         currentMonth = new DateOnly(today.Year, today.Month, 1);
         selectedDay = today;
         openEvent = null;
+        selection = null;
+        scrollPending = true;
         BuildGrid();
         await Load();
     }

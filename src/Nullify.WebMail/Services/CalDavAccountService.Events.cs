@@ -141,9 +141,9 @@ public sealed partial class CalDavAccountService
         return ICalendarWriter.RepeatOf(master?.RRule);
     }
 
-    /// <summary>The account's event calendars, or null when no calendar server is configured.</summary>
+    /// <summary>The calendars events can be added to, or null when no calendar server is configured.</summary>
     public async Task<IReadOnlyList<CalendarInfo>?> GetCalendarsAsync() =>
-        await DiscoveredAsync() is { } d ? d.Found.Collections.Where(c => c.Supports("VEVENT")).Select(c => c.Info).ToList() : null;
+        await DiscoveredAsync() is { } d ? d.Found.EventCalendars.Where(c => !c.Info.ReadOnly).Select(c => c.Info).ToList() : null;
 
     /// <summary>
     /// Copy the events in an .ics file into a calendar, one resource per UID. Events the
@@ -184,7 +184,7 @@ public sealed partial class CalDavAccountService
               </c:comp-filter></c:comp-filter></c:filter>
             </c:calendar-query>
             """;
-        foreach (var c in d.Found.Collections.Where(c => c.Supports("VEVENT")))
+        foreach (var c in d.Found.EventCalendars)
         {
             System.Xml.Linq.XDocument doc;
             try { (_, doc) = await SendAsync(d.Account, "REPORT", c.Href, 1, body); }

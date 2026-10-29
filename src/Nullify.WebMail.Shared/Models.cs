@@ -154,8 +154,40 @@ public sealed record EventEdit(
     DateTime StartLocal, DateTime EndLocal, EventRepeat Repeat,
     IReadOnlyList<EventAttendee>? Attendees = null, SenderIdentity? Organizer = null);
 
-/// <summary>A calendar collection on the CalDAV server.</summary>
-public sealed record CalendarInfo(string Id, string Name, string? Color);
+/// <summary>Where a calendar comes from.</summary>
+public enum CalendarKind
+{
+    /// <summary>One of the user's own calendars.</summary>
+    Own,
+    /// <summary>Someone else's calendar shared with the user (it sits in their calendar home).</summary>
+    Shared,
+    /// <summary>A calendar of someone who made the user their delegate (calendar proxy).</summary>
+    Delegated,
+    /// <summary>An internet calendar (.ics feed) or another CalDAV calendar the user added by its address.</summary>
+    Subscribed,
+}
+
+/// <summary>A calendar collection on the CalDAV server, or a calendar the user subscribed to.</summary>
+public sealed record CalendarInfo(string Id, string Name, string? Color)
+{
+    public CalendarKind Kind { get; init; }
+    /// <summary>Who shared or delegated it, for <see cref="CalendarKind.Shared"/> and <see cref="CalendarKind.Delegated"/>.</summary>
+    public string? OwnerName { get; init; }
+    /// <summary>The user can see its events but not add or change them.</summary>
+    public bool ReadOnly { get; init; }
+    /// <summary>The server lets the user share it with other people over CalDAV.</summary>
+    public bool CanShare { get; init; }
+}
+
+/// <summary>Someone a calendar is shared with.</summary>
+public sealed record CalendarSharee(string Address, string? Name, bool CanEdit, ShareStatus Status)
+{
+    /// <summary>The address without its mailto: prefix.</summary>
+    public string Email => Address.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase) ? Address[7..] : Address;
+    public string Display => string.IsNullOrWhiteSpace(Name) ? Email : Name;
+}
+
+public enum ShareStatus { Pending, Accepted, Declined, Invalid }
 
 public sealed record CalendarRange(IReadOnlyList<CalendarInfo> Calendars, IReadOnlyList<CalendarEvent> Events, IReadOnlyList<string> Errors);
 

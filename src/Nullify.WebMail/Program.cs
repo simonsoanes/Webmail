@@ -79,6 +79,9 @@ builder.Services.AddHttpClient(WebDavService.HttpClientName, c => c.Timeout = Ti
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddHttpClient(CalDavAccountService.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(15))
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+// Internet calendars: addresses users type in, so only public hosts (see PublicNetwork).
+builder.Services.AddHttpClient(PublicNetwork.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(20))
+    .ConfigurePrimaryHttpMessageHandler(PublicNetwork.CreateHandler);
 builder.Services.AddHttpContextAccessor();
 
 // ------------------------------------------------------------------ Blazor

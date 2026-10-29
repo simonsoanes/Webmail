@@ -260,6 +260,72 @@ window.nullifyApp = (() => {
 
         confirm(message) { return window.confirm(message); },
 
+        /**
+         * Drag across days ([data-day]) or times ([data-slot]) on the calendar to highlight them.
+         * The drag is painted here, without round trips; the calendar hears of the range when the
+         * button goes up: OnCalendarRange(kind, from, to) with the first and last cells' keys.
+         * A click on a time slot is reported the same way (from == to); clicks on days are left to
+         * the calendar. Touch only taps, so the page still scrolls.
+         */
+        calendarSelect(root, ref) {
+            if (!root) return;
+            if (root._calSel) { root._calSel.ref = ref; return; }
+            const s = root._calSel = { ref, kind: null, anchor: null, current: null, moved: false, swallow: false, touch: false };
+            const key = (el) => s.kind === 'slot' ? el.dataset.slot : el.dataset.day;
+            const selector = () => s.kind === 'slot' ? '[data-slot]' : '[data-day]';
+            const paint = () => {
+                const a = key(s.anchor), b = key(s.current);
+                const [lo, hi] = a <= b ? [a, b] : [b, a];
+                root.querySelectorAll(selector()).forEach(el => {
+                    const k = key(el);
+                    el.classList.toggle('sel-drag', s.moved && k >= lo && k <= hi);
+                });
+            };
+            const clear = () => root.querySelectorAll('.sel-drag').forEach(el => el.classList.remove('sel-drag'));
+            root.addEventListener('pointerdown', (e) => {
+                if (e.button !== 0 || e.target.closest('button, a, input, select, .tg-event, .sel-toolbar')) return;
+                const cell = e.target.closest('[data-day], [data-slot]');
+                if (!cell || !root.contains(cell)) return;
+                s.kind = cell.dataset.slot ? 'slot' : 'day';
+                s.anchor = s.current = cell;
+                s.moved = false;
+                s.touch = e.pointerType === 'touch';
+            });
+            window.addEventListener('pointermove', (e) => {
+                if (!s.anchor || s.touch) return;
+                const hit = document.elementFromPoint(e.clientX, e.clientY);
+                const cell = hit && hit.closest(selector());
+                if (!cell || !root.contains(cell) || cell === s.current) return;
+                s.current = cell;
+                s.moved = true;
+                paint();
+            });
+            window.addEventListener('pointerup', () => {
+                if (!s.anchor) return;
+                const from = key(s.anchor), to = key(s.current), kind = s.kind, moved = s.moved;
+                s.anchor = s.current = null;
+                if (moved) {
+                    // The click that follows a drag isn't a click on a day (it comes straight after, if at all).
+                    s.swallow = true;
+                    setTimeout(() => { s.swallow = false; }, 0);
+                }
+                if ((moved || kind === 'slot') && s.ref) s.ref.invokeMethodAsync('OnCalendarRange', kind, from, to).finally(clear);
+                else clear();
+            });
+            window.addEventListener('pointercancel', () => { s.anchor = s.current = null; clear(); });
+            root.addEventListener('click', (e) => {
+                if (!s.swallow) return;
+                s.swallow = false;
+                e.stopPropagation();
+            }, true);
+        },
+
+        /** Scroll the time grid so that a time of day (minutes after midnight) is near the top. */
+        scrollCalendarTo(el, minutes) {
+            if (!el) return;
+            el.scrollTop = Math.max(0, el.scrollHeight * minutes / 1440 - 8);
+        },
+
         /** Tell the mail page, if it is up, that files were opened with the app. */
         notifyLaunchedFiles() { if (dotnet) dotnet.invokeMethodAsync('OnFilesLaunched'); },
 

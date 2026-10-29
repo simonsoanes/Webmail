@@ -171,6 +171,8 @@
     [Parameter] public Func<string?, string> ColorOf { get; set; } = _ => "var(--accent)";
     [Parameter] public string? DefaultCalendarId { get; set; }
     [Parameter] public DateOnly Day { get; set; }
+    /// <summary>For a new event, the highlighted days (End is the last day) or times (End exclusive); overrides <see cref="Day"/>.</summary>
+    [Parameter] public CalendarSlot? Slot { get; set; }
     [Parameter] public TimeZoneInfo Zone { get; set; } = TimeZoneInfo.Utc;
     /// <summary>The user's addresses: who can organise a meeting, and how the editor knows it's theirs.</summary>
     [Parameter] public IReadOnlyList<SenderIdentity> Senders { get; set; } = [];
@@ -238,6 +240,25 @@
                 try { repeat = await Dav.GetRepeatAsync(ev); } catch { repeat = EventRepeat.Weekly; }
                 customRule = repeat == EventRepeat.None;
                 if (customRule) repeat = EventRepeat.Weekly;
+            }
+        }
+        else if (Slot is { } slot)
+        {
+            // New, for the days or times the user highlighted.
+            allDay = slot.AllDay;
+            startDate = DateOnly.FromDateTime(slot.Start);
+            endDate = DateOnly.FromDateTime(slot.End);
+            if (allDay)
+            {
+                startTime = new TimeOnly(9, 0);
+                endTime = new TimeOnly(10, 0);
+            }
+            else
+            {
+                startTime = TimeOnly.FromDateTime(slot.Start);
+                endTime = TimeOnly.FromDateTime(slot.End);
+                // Up to midnight: end at 23:59 that day rather than 00:00 the next.
+                if (slot.End.TimeOfDay == TimeSpan.Zero && slot.End > slot.Start) (endDate, endTime) = (endDate.AddDays(-1), new TimeOnly(23, 59));
             }
         }
         else

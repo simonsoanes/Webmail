@@ -17,8 +17,15 @@ public sealed record CalDavAccount(Uri Url, string Username, string Password);
 /// <summary>A CalDAV failure with a message fit to show the user.</summary>
 public sealed class CalDavException(string message) : Exception(message);
 
-/// <summary>A calendar collection and the components (VEVENT, VTODO, VJOURNAL) it accepts.</summary>
-internal sealed record CalCollection(Uri Href, CalendarInfo Info, IReadOnlySet<string> Components)
+/// <summary>How a server lets its users share calendars with each other over CalDAV.</summary>
+public enum SharingProtocol { None, ResourceSharing, CalendarServer }
+
+/// <summary>
+/// A calendar collection, the components (VEVENT, VTODO, VJOURNAL) it accepts, its owner's
+/// principal (when the server says) and how it can be shared.
+/// </summary>
+internal sealed record CalCollection(Uri Href, CalendarInfo Info, IReadOnlySet<string> Components,
+    Uri? Owner = null, SharingProtocol Sharing = SharingProtocol.None)
 {
     /// <summary>A collection that doesn't advertise a component set accepts any (RFC 4791 5.2.3).</summary>
     public bool Supports(string component) => Components.Count == 0 || Components.Contains(component);
@@ -43,12 +50,21 @@ public sealed partial class CalDavAccountService(
     private static readonly XNamespace Dav = "DAV:";
     private static readonly XNamespace Cal = "urn:ietf:params:xml:ns:caldav";
     private static readonly XNamespace Apple = "http://apple.com/ns/ical/";
+    private static readonly XNamespace CS = "http://calendarserver.org/ns/";
 
     // Discovery is a few round-trips; reuse it for the life of the circuit unless settings change.
     private (string Key, Discovery Found)? _discovered;
 
-    /// <summary>The calendar home (where new collections are made) and every collection in it.</summary>
-    private sealed record Discovery(Uri Home, IReadOnlyList<CalCollection> Collections);
+    /// <summary>
+    /// The calendar home (where new collections are made), every collection in it (the user's
+    /// own and those shared with them), the calendars of people who made the user their
+    /// delegate, and how the server lets calendars be shared.
+    /// </summary>
+    private sealed record Discovery(Uri Home, IReadOnlyList<CalCollection> Collections,
+        IReadOnlyList<CalCollection> Delegated, SharingProtocol Sharing)
+    {
+        public IEnumerable<CalCollection> EventCalendars => Collections.Where(c => c.Supports("VEVENT"));
+    }
 
     private CredentialInfo Cred =>
         session.Credential ?? throw new InvalidOperationException("Not authenticated.");
@@ -191,7 +207,7 @@ public sealed partial class CalDavAccountService(
 
     /// <summary>Names of the account's calendars (used by the connection test).</summary>
     public async Task<IReadOnlyList<string>> DiscoverCalendarsAsync(CalDavAccount account) =>
-        (await DiscoverAsync(account)).Collections.Where(c => c.Supports("VEVENT")).Select(c => c.Info.Name).ToList();
+        (await DiscoverAsync(account)).EventCalendars.Select(c => c.Info.Name).ToList();
 
     /// <summary>Discovery for the signed-in account, cached until settings change or a refresh.</summary>
     private async Task<(CalDavAccount Account, Discovery Found)?> DiscoveredAsync()
@@ -203,59 +219,177 @@ public sealed partial class CalDavAccountService(
         return (account, _discovered.Value.Found);
     }
 
+    private const string ListProps =
+        "<d:resourcetype/><d:displayname/><a:calendar-color/><c:supported-calendar-component-set/>" +
+        "<d:owner/><d:current-user-privilege-set/><cs:allowed-sharing-modes/>";
+    private const string DelegationProps = "<cs:calendar-proxy-read-for/><cs:calendar-proxy-write-for/>";
+
     /// <summary>RFC 4791/6764 discovery: the URL itself, its principal's calendar-home-set, then the home's calendars.</summary>
     private async Task<Discovery> DiscoverAsync(CalDavAccount account)
     {
-        const string listProps = "<d:resourcetype/><d:displayname/><a:calendar-color/><c:supported-calendar-component-set/>";
         var (start, doc) = await PropfindAsync(account, account.Url, 0,
-            listProps + "<d:current-user-principal/><c:calendar-home-set/>");
+            ListProps + "<d:current-user-principal/><c:calendar-home-set/>" + DelegationProps);
 
         // The URL may already be a calendar collection.
         var self = doc.Descendants(Dav + "response").FirstOrDefault();
-        if (self != null && IsCalendar(self)) return new Discovery(new Uri(start, start.AbsolutePath.EndsWith('/') ? "../" : "./"), [ToCalendar(self, start)]);
+        if (self != null && IsCalendar(self))
+            return new Discovery(new Uri(start, start.AbsolutePath.EndsWith('/') ? "../" : "./"), [ToCalendar(self, start)], [], SharingProtocol.None);
 
+        var principal = Href(doc, Dav + "current-user-principal", start);
         var home = Href(doc, Cal + "calendar-home-set", start);
+        var principalDoc = home != null ? doc : null;
         if (home == null)
         {
-            var principal = Href(doc, Dav + "current-user-principal", start);
             if (principal == null)
                 throw new CalDavException("The server answered but did not identify a calendar account — check the URL.");
-            var (pUri, pDoc) = await PropfindAsync(account, principal, 0, "<c:calendar-home-set/>");
+            var (pUri, pDoc) = await PropfindAsync(account, principal, 0, "<c:calendar-home-set/>" + DelegationProps);
+            principalDoc = pDoc;
             home = Href(pDoc, Cal + "calendar-home-set", pUri)
                    ?? throw new CalDavException("This account has no calendar home on the server.");
         }
+        principal ??= start; // the URL was the principal itself
 
-        var (homeUri, list) = await PropfindAsync(account, home, 1, listProps);
-        return new Discovery(homeUri,
-            list.Descendants(Dav + "response").Where(IsCalendar).Select(r => ToCalendar(r, homeUri)).ToList());
+        var (homeUri, list) = await PropfindAsync(account, home, 1, ListProps);
+        var sharing = await SharingProtocolAsync(account, homeUri);
+        var collections = list.Descendants(Dav + "response").Where(IsCalendar)
+            .Select(r => ToCalendar(r, homeUri, principal, sharing)).ToList();
+        collections = await NameOwnersAsync(account, collections);
+        var delegated = await DelegatedCalendarsAsync(account, principalDoc!, principal, collections);
+        return new Discovery(homeUri, collections, delegated, sharing);
     }
+
+    /// <summary>
+    /// Calendars of the people who made the user their delegate (CalendarServer calendar-proxy).
+    /// Best effort: a delegator whose calendars can't be read is left out.
+    /// </summary>
+    private async Task<IReadOnlyList<CalCollection>> DelegatedCalendarsAsync(
+        CalDavAccount account, XDocument principalDoc, Uri principal, IReadOnlyList<CalCollection> own)
+    {
+        var owners = new List<(Uri Principal, bool Write)>();
+        foreach (var (prop, write) in new[] { (CS + "calendar-proxy-read-for", false), (CS + "calendar-proxy-write-for", true) })
+            foreach (var href in principalDoc.Descendants(prop).Elements(Dav + "href"))
+                if (!string.IsNullOrWhiteSpace(href.Value))
+                    owners.Add((new Uri(principal, href.Value.Trim()), write));
+
+        var result = new List<CalCollection>();
+        var seen = own.Select(c => c.Info.Id).ToHashSet();
+        foreach (var (owner, write) in owners.DistinctBy(o => o.Principal.AbsoluteUri))
+        {
+            try
+            {
+                var (pUri, pDoc) = await PropfindAsync(account, owner, 0, "<d:displayname/><c:calendar-home-set/>");
+                var home = Href(pDoc, Cal + "calendar-home-set", pUri);
+                if (home == null) continue;
+                var name = pDoc.Descendants(Dav + "displayname").FirstOrDefault()?.Value.Trim();
+                if (string.IsNullOrEmpty(name)) name = LastSegment(owner.AbsolutePath);
+                var (homeUri, list) = await PropfindAsync(account, home, 1, ListProps);
+                foreach (var r in list.Descendants(Dav + "response").Where(IsCalendar))
+                {
+                    var c = ToCalendar(r, homeUri, principal, SharingProtocol.None);
+                    if (!seen.Add(c.Info.Id) || !c.Supports("VEVENT")) continue;
+                    // The proxy grant decides; a server that reports privileges may narrow it further.
+                    var readOnly = !write || c.Info.ReadOnly;
+                    result.Add(c with { Info = c.Info with { Kind = CalendarKind.Delegated, OwnerName = name, ReadOnly = readOnly } });
+                }
+            }
+            catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException)
+            {
+                logger.LogInformation("CalDAV delegated calendars of {Owner} failed: {Msg}", owner, ex.Message);
+            }
+        }
+        return result;
+    }
+
+    /// <summary>Put the owners' names on calendars shared with the user (best effort; falls back to their user name).</summary>
+    private async Task<List<CalCollection>> NameOwnersAsync(CalDavAccount account, List<CalCollection> collections)
+    {
+        var names = new Dictionary<string, string>();
+        foreach (var owner in collections.Where(c => c.Info.Kind == CalendarKind.Shared && c.Owner != null).Select(c => c.Owner!).DistinctBy(o => o.AbsoluteUri))
+        {
+            var name = LastSegment(owner.AbsolutePath);
+            try
+            {
+                var (_, doc) = await PropfindAsync(account, owner, 0, "<d:displayname/>");
+                var display = doc.Descendants(Dav + "displayname").FirstOrDefault()?.Value.Trim();
+                if (!string.IsNullOrEmpty(display)) name = display;
+            }
+            catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException) { }
+            names[owner.AbsoluteUri] = name;
+        }
+        return collections.Select(c => c.Owner != null && names.TryGetValue(c.Owner.AbsoluteUri, out var n)
+            ? c with { Info = c.Info with { OwnerName = n } } : c).ToList();
+    }
+
+    /// <summary>Which sharing extension the server offers, from the DAV header of an OPTIONS request.</summary>
+    private async Task<SharingProtocol> SharingProtocolAsync(CalDavAccount account, Uri home)
+    {
+        try
+        {
+            var http = httpFactory.CreateClient(HttpClientName);
+            using var req = new HttpRequestMessage(HttpMethod.Options, home);
+            req.Headers.Authorization = BasicAuth(account);
+            using var resp = await http.SendAsync(req);
+            return SharingFromDavHeader(resp.Headers.TryGetValues("DAV", out var values) ? values : []);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return SharingProtocol.None;
+        }
+    }
+
+    /// <summary>
+    /// "resource-sharing" is draft-pot-webdav-resource-sharing (SabreDAV 4, Cyrus);
+    /// "calendarserver-sharing" is Apple's CalendarServer extension (SabreDAV, iCloud, Nextcloud).
+    /// </summary>
+    public static SharingProtocol SharingFromDavHeader(IEnumerable<string> davHeaders)
+    {
+        var tokens = davHeaders.SelectMany(h => h.Split(',')).Select(t => t.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (tokens.Contains("resource-sharing")) return SharingProtocol.ResourceSharing;
+        if (tokens.Contains("calendarserver-sharing")) return SharingProtocol.CalendarServer;
+        return SharingProtocol.None;
+    }
+
+    private static string LastSegment(string path) => Uri.UnescapeDataString(path.TrimEnd('/').Split('/')[^1]);
 
     // ------------------------------------------------------------------ events
 
     /// <summary>
-    /// Events overlapping [from, to) across all of the account's event calendars. A calendar
-    /// that fails is reported in <see cref="CalendarRange.Errors"/> rather than failing the rest.
+    /// Events overlapping [from, to) across the account's event calendars, the calendars of
+    /// people the user is a delegate for, and the user's subscriptions. A calendar that fails is
+    /// reported in <see cref="CalendarRange.Errors"/> rather than failing the rest. Null when
+    /// there's no calendar server and nothing subscribed.
     /// </summary>
+    /// <param name="fetch">Which calendars to read; the rest (turned off by the user) are listed without their events.</param>
     /// <exception cref="CalDavException">Discovery failed (bad URL or credentials).</exception>
-    public async Task<CalendarRange?> GetEventsAsync(DateTimeOffset from, DateTimeOffset to, TimeZoneInfo viewerZone)
+    public async Task<CalendarRange?> GetEventsAsync(DateTimeOffset from, DateTimeOffset to, TimeZoneInfo viewerZone,
+        Func<CalendarInfo, bool>? fetch = null)
     {
-        if (await DiscoveredAsync() is not { } discovered) return null;
-        var (account, found) = discovered;
-        var calendars = found.Collections.Where(c => c.Supports("VEVENT")).ToList();
+        var subscriptions = await GetSubscriptionsAsync();
+        var discovered = await DiscoveredAsync();
+        if (discovered == null && subscriptions.Count == 0) return null;
+        var account = discovered?.Account;
 
-        var tasks = calendars.Select(async c =>
+        var sources = new List<(CalendarInfo Info, Func<Task<IReadOnlyList<CalendarEvent>>> Fetch)>();
+        if (discovered is { } d)
+            foreach (var c in d.Found.EventCalendars.Concat(d.Found.Delegated))
+                sources.Add((c.Info, () => QueryAsync(d.Account, c.Href, c.Info.Id, from, to, viewerZone)));
+        foreach (var sub in subscriptions)
+            sources.Add((sub.ToInfo(), () => SubscriptionEventsAsync(sub, account, from, to, viewerZone)));
+
+        var tasks = sources.Select(async s =>
         {
-            try { return (c.Info, Events: await QueryAsync(account, c.Href, c.Info.Id, from, to, viewerZone), Error: (string?)null); }
+            if (fetch?.Invoke(s.Info) == false) return (Events: (IReadOnlyList<CalendarEvent>)[], Error: (string?)null);
+            try { return (Events: await s.Fetch(), Error: (string?)null); }
             catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException)
             {
-                logger.LogInformation("CalDAV query {Calendar} failed: {Msg}", c.Href, ex.Message);
-                return (c.Info, Events: (IReadOnlyList<CalendarEvent>)[], Error: (string?)$"{c.Info.Name}: {ex.Message}");
+                logger.LogInformation("Calendar query {Calendar} failed: {Msg}", s.Info.Name, ex.Message);
+                return (Events: (IReadOnlyList<CalendarEvent>)[], Error: (string?)$"{s.Info.Name}: {ex.Message}");
             }
         }).ToList();
         var results = await Task.WhenAll(tasks);
 
         return new CalendarRange(
-            calendars.Select(c => c.Info).ToList(),
+            sources.Select(s => s.Info).ToList(),
             results.SelectMany(r => r.Events).OrderBy(e => e.Start).ThenByDescending(e => e.AllDay).ToList(),
             results.Where(r => r.Error != null).Select(r => r.Error!).ToList());
     }
@@ -264,6 +398,7 @@ public sealed partial class CalDavAccountService(
     public void InvalidateCache()
     {
         _discovered = null;
+        _feeds.Clear();
         _discoveredBooks = null;
         _contacts = null;
     }
@@ -307,7 +442,7 @@ public sealed partial class CalDavAccountService(
 
     private Task<(Uri Url, XDocument Doc)> PropfindAsync(CalDavAccount account, Uri url, int depth, string props) =>
         SendAsync(account, "PROPFIND", url, depth,
-            $"""<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/"><d:prop>{props}</d:prop></d:propfind>""");
+            $"""<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/" xmlns:cs="http://calendarserver.org/ns/"><d:prop>{props}</d:prop></d:propfind>""");
 
     private async Task<(Uri Url, XDocument Doc)> SendAsync(CalDavAccount account, string method, Uri url, int depth, string body)
     {
@@ -318,8 +453,7 @@ public sealed partial class CalDavAccountService(
         for (var hop = 0; hop < 4; hop++)
         {
             using var req = new HttpRequestMessage(new HttpMethod(method), url);
-            req.Headers.Authorization = new AuthenticationHeaderValue("Basic",
-                Convert.ToBase64String(Encoding.UTF8.GetBytes($"{account.Username}:{account.Password}")));
+            req.Headers.Authorization = BasicAuth(account);
             req.Headers.Add("Depth", depth.ToString());
             req.Content = new StringContent(body, Encoding.UTF8, "application/xml");
             using var resp = await http.SendAsync(req);
@@ -353,7 +487,12 @@ public sealed partial class CalDavAccountService(
         throw new CalDavException("Too many redirects.");
     }
 
-    private static CalCollection ToCalendar(XElement response, Uri baseUri)
+    private static AuthenticationHeaderValue BasicAuth(CalDavAccount account) =>
+        new("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{account.Username}:{account.Password}")));
+
+    /// <param name="principal">The user's principal: a calendar another principal owns is shared with them.</param>
+    /// <param name="sharing">How the server shares calendars (from its DAV header).</param>
+    private static CalCollection ToCalendar(XElement response, Uri baseUri, Uri? principal = null, SharingProtocol sharing = SharingProtocol.None)
     {
         var href = response.Element(Dav + "href")?.Value.Trim();
         var abs = string.IsNullOrEmpty(href) ? baseUri : new Uri(baseUri, href);
@@ -364,8 +503,38 @@ public sealed partial class CalDavAccountService(
         var components = response.Descendants(Cal + "supported-calendar-component-set").Elements(Cal + "comp")
             .Select(c => ((string?)c.Attribute("name"))?.ToUpperInvariant()).OfType<string>()
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return new CalCollection(abs, new CalendarInfo(abs.AbsoluteUri, DisplayName(response, baseUri), color), components);
+        var ownerHref = response.Descendants(Dav + "owner").Elements(Dav + "href").FirstOrDefault()?.Value.Trim();
+        var owner = string.IsNullOrEmpty(ownerHref) ? null : new Uri(baseUri, ownerHref);
+        var shared = owner != null && principal != null && !SamePath(owner, principal);
+        var readOnly = IsReadOnly(response);
+        // CalendarServer marks each calendar that can be shared, even where the DAV header doesn't say.
+        if (sharing == SharingProtocol.None && response.Descendants(CS + "allowed-sharing-modes").Elements(CS + "can-be-shared").Any())
+            sharing = SharingProtocol.CalendarServer;
+        var info = new CalendarInfo(abs.AbsoluteUri, DisplayName(response, baseUri), color)
+        {
+            Kind = shared ? CalendarKind.Shared : CalendarKind.Own,
+            ReadOnly = readOnly,
+            CanShare = !shared && !readOnly && sharing != SharingProtocol.None,
+        };
+        return new CalCollection(abs, info, components, owner, shared ? SharingProtocol.None : sharing);
     }
+
+    /// <summary>
+    /// A collection whose current-user-privilege-set (RFC 3744) grants no way to add or change
+    /// objects. Servers that don't report privileges are assumed to allow writes.
+    /// </summary>
+    public static bool IsReadOnly(XElement response)
+    {
+        var set = response.Descendants(Dav + "current-user-privilege-set").FirstOrDefault();
+        if (set == null) return false;
+        var granted = set.Elements(Dav + "privilege").Elements().Select(e => e.Name).ToHashSet();
+        if (granted.Count == 0) return false; // an empty set is how some servers say "not reported"
+        return !granted.Overlaps([Dav + "all", Dav + "write", Dav + "write-content", Dav + "bind"]);
+    }
+
+    private static bool SamePath(Uri a, Uri b) =>
+        a.Host.Equals(b.Host, StringComparison.OrdinalIgnoreCase) &&
+        Uri.UnescapeDataString(a.AbsolutePath).TrimEnd('/').Equals(Uri.UnescapeDataString(b.AbsolutePath).TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>A calendar collection (of events, tasks or notes).</summary>
     private static bool IsCalendar(XElement response) =>
@@ -381,8 +550,7 @@ public sealed partial class CalDavAccountService(
     {
         var http = httpFactory.CreateClient(HttpClientName);
         using var req = new HttpRequestMessage(method, url);
-        req.Headers.Authorization = new AuthenticationHeaderValue("Basic",
-            Convert.ToBase64String(Encoding.UTF8.GetBytes($"{account.Username}:{account.Password}")));
+        req.Headers.Authorization = BasicAuth(account);
         foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
         if (body != null)
         {

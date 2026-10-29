@@ -342,6 +342,39 @@ public static partial class ICalendar
         return true;
     }
 
+    /// <summary>
+    /// The name and colour a published calendar gives itself: RFC 7986 NAME or the widely used
+    /// X-WR-CALNAME, and X-APPLE-CALENDAR-COLOR (as #RRGGBB). Only the calendar's own properties
+    /// count, not those of the events inside it.
+    /// </summary>
+    public static (string? Name, string? Color) CalendarProperties(string ics)
+    {
+        string? name = null, color = null;
+        var depth = 0;
+        foreach (var line in Unfold(ics))
+        {
+            var (prop, _, value) = SplitProperty(line);
+            if (prop.Equals("BEGIN", StringComparison.OrdinalIgnoreCase)) { depth++; continue; }
+            if (prop.Equals("END", StringComparison.OrdinalIgnoreCase)) { depth--; continue; }
+            if (depth != 1) continue;
+            switch (prop.ToUpperInvariant())
+            {
+                case "NAME":
+                    name = NullIfEmpty(Unescape(value)) ?? name;
+                    break;
+                case "X-WR-CALNAME":
+                    name ??= NullIfEmpty(Unescape(value));
+                    break;
+                case "X-APPLE-CALENDAR-COLOR":
+                    var c = value.Trim();
+                    if (c.Length == 9 && c[0] == '#') c = c[..7];
+                    if (System.Text.RegularExpressions.Regex.IsMatch(c, "^#[0-9A-Fa-f]{6}$")) color = c;
+                    break;
+            }
+        }
+        return (name, color);
+    }
+
     /// <summary>Content lines with RFC 5545 folding undone.</summary>
     public static IEnumerable<string> UnfoldLines(string ics) => Unfold(ics);
 

@@ -1,0 +1,86 @@
+@using Nullify.WebMail.Services
+@inject CalDavAccountService CalDav
+
+@* Adding a public or published internet calendar by its address. *@
+<div class="modal-backdrop" @onclick="Cancel">
+    <form class="modal cal-subscribe" role="dialog" aria-modal="true" aria-labelledby="sub-heading"
+          @onclick:stopPropagation="true" @onsubmit="Add" @onsubmit:preventDefault="true">
+        <div class="modal-head">
+            <h3 id="sub-heading">Add a calendar</h3>
+            <span class="spacer"></span>
+            <button type="button" class="icon-btn" @onclick="Cancel" title="Close"><Icon Name="x" /></button>
+        </div>
+
+        <div class="modal-body">
+            <div class="field">
+                <label for="sub-url">Calendar address</label>
+                <input id="sub-url" @ref="urlInput" @bind="url" @bind:event="oninput" placeholder="webcal://… or https://…/calendar.ics"
+                       autocomplete="off" spellcheck="false" inputmode="url" required />
+                <span class="help">
+                    A published internet calendar (an .ics or webcal:// link, such as public holidays, sports fixtures or a
+                    colleague's published calendar), or the address of a public calendar on your CalDAV server.
+                </span>
+            </div>
+            <div class="field">
+                <label for="sub-name">Name <span class="muted">(optional)</span></label>
+                <input id="sub-name" @bind="name" placeholder="Uses the calendar's own name" autocomplete="off" />
+            </div>
+            <p class="muted small-print">Subscribed calendars are read-only here and refresh every 15 minutes or when you press refresh.</p>
+
+            @if (error != null)
+            {
+                <div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@error</div></div>
+            }
+        </div>
+
+        <div class="modal-foot">
+            <span class="spacer"></span>
+            <button type="button" class="btn" @onclick="Cancel" disabled="@busy">Cancel</button>
+            <button type="submit" class="btn accent" disabled="@(busy || string.IsNullOrWhiteSpace(url))">
+                @if (busy) { <span class="spinner"></span> } Add calendar
+            </button>
+        </div>
+    </form>
+</div>
+
+@code {
+    /// <summary>Raised with the new subscription once it's saved.</summary>
+    [Parameter] public EventCallback<CalendarSubscription> OnAdded { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private string url = "", name = "";
+    private string? error;
+    private bool busy;
+    private ElementReference urlInput;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender) try { await urlInput.FocusAsync(); } catch { /* not attached */ }
+    }
+
+    private async Task Add()
+    {
+        if (busy || string.IsNullOrWhiteSpace(url)) return;
+        busy = true;
+        error = null;
+        try
+        {
+            var added = await CalDav.SubscribeAsync(url, name);
+            await OnAdded.InvokeAsync(added);
+        }
+        catch (CalDavException ex)
+        {
+            error = ex.Message;
+        }
+        catch (InvalidOperationException ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private Task Cancel() => busy ? Task.CompletedTask : OnClose.InvokeAsync();
+}

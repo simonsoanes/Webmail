@@ -1,0 +1,142 @@
+@using Nullify.WebMail.Services
+@inject CalDavAccountService CalDav
+
+@* Sharing one of the user's calendars with other people on their CalDAV server. *@
+<div class="modal-backdrop" @onclick="Cancel">
+    <form class="modal cal-share" role="dialog" aria-modal="true" aria-labelledby="share-heading" style="--cal:@Color"
+          @onclick:stopPropagation="true" @onsubmit="Add" @onsubmit:preventDefault="true">
+        <div class="modal-head">
+            <span class="cal-swatch" aria-hidden="true"></span>
+            <h3 id="share-heading">Share “@Calendar.Name”</h3>
+            <span class="spacer"></span>
+            <button type="button" class="icon-btn" @onclick="Cancel" title="Close"><Icon Name="x" /></button>
+        </div>
+
+        <div class="modal-body">
+            <div class="share-add">
+                <input type="email" @ref="emailInput" @bind="email" @bind:event="oninput" placeholder="Email address" aria-label="Email address of the person to share with"
+                       autocomplete="off" required />
+                <select @bind="newCanEdit" aria-label="What they can do">
+                    <option value="false">Can view</option>
+                    <option value="true">Can edit</option>
+                </select>
+                <button type="submit" class="btn accent" disabled="@(busy || string.IsNullOrWhiteSpace(email))">Share</button>
+            </div>
+            <p class="muted small-print">They need an account on your calendar server. Some servers send them an invitation to accept first.</p>
+
+            @if (error != null)
+            {
+                <div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@error</div></div>
+            }
+
+            <h4 class="share-heading">People with access</h4>
+            @if (sharees == null)
+            {
+                @if (error == null) { <p class="muted"><span class="spinner"></span> Loading…</p> }
+            }
+            else if (sharees.Count == 0)
+            {
+                <p class="muted">Only you can see this calendar.</p>
+            }
+            else
+            {
+                <ul class="share-list">
+                    @foreach (var s in sharees)
+                    {
+                        var sharee = s;
+                        <li>
+                            <span class="share-who">
+                                <span class="share-name" title="@sharee.Email">@sharee.Display</span>
+                                @if (StatusText(sharee.Status) is { } text) { <span class="share-status @sharee.Status.ToString().ToLowerInvariant()">@text</span> }
+                            </span>
+                            <select value="@(sharee.CanEdit ? "true" : "false")" aria-label="What @sharee.Display can do" disabled="@busy"
+                                    @onchange="e => Change(sharee, e)">
+                                <option value="false">Can view</option>
+                                <option value="true">Can edit</option>
+                            </select>
+                            <button type="button" class="icon-btn small" title="Stop sharing with @sharee.Display" disabled="@busy"
+                                    @onclick="() => Remove(sharee)"><Icon Name="x" Size="15" /></button>
+                        </li>
+                    }
+                </ul>
+            }
+        </div>
+
+        <div class="modal-foot">
+            <span class="spacer"></span>
+            <button type="button" class="btn" @onclick="Cancel">Done</button>
+        </div>
+    </form>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public CalendarInfo Calendar { get; set; } = default!;
+    [Parameter] public string Color { get; set; } = "var(--accent)";
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private IReadOnlyList<CalendarSharee>? sharees;
+    private string email = "";
+    private bool newCanEdit, busy;
+    private string? error;
+    private ElementReference emailInput;
+
+    protected override async Task OnInitializedAsync() => await Reload();
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender) try { await emailInput.FocusAsync(); } catch { /* not attached */ }
+    }
+
+    private async Task Reload()
+    {
+        try { sharees = await CalDav.GetShareesAsync(Calendar.Id); }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            error = Message(ex);
+            sharees ??= [];
+        }
+    }
+
+    private Task Add() => Run(() => CalDav.ShareAsync(Calendar.Id, email, null, newCanEdit), () => email = "");
+
+    private Task Change(CalendarSharee sharee, ChangeEventArgs e)
+    {
+        var canEdit = e.Value as string == "true";
+        return canEdit == sharee.CanEdit ? Task.CompletedTask : Run(() => CalDav.ShareAsync(Calendar.Id, sharee.Address, sharee.Name, canEdit));
+    }
+
+    private Task Remove(CalendarSharee sharee) => Run(() => CalDav.UnshareAsync(Calendar.Id, sharee.Address));
+
+    private async Task Run(Func<Task> change, Action? done = null)
+    {
+        if (busy) return;
+        busy = true;
+        error = null;
+        try
+        {
+            await change();
+            done?.Invoke();
+            await Reload();
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            error = Message(ex);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private static string Message(Exception ex) => ex is TaskCanceledException ? "The server did not respond in time." : ex.Message;
+
+    private static string? StatusText(ShareStatus status) => status switch
+    {
+        ShareStatus.Pending => "Invited",
+        ShareStatus.Declined => "Declined",
+        ShareStatus.Invalid => "Unknown user",
+        _ => null,
+    };
+
+    private Task Cancel() => OnClose.InvokeAsync();
+}

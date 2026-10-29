@@ -5,7 +5,7 @@ A self-hosted **webmail client** for your existing IMAP/SMTP server, with calend
 - **Mail** over IMAP and SMTP: folders, search, flags, move and archive, attachments, HTML and plain-text compose, reply and forward
 - **Safe message display**: HTML mail is rendered in a sandboxed iframe, with remote images blocked until you allow them
 - **OpenPGP** in the browser: key generation, import and export, encrypt, decrypt, sign and verify, with optional unlock by a security key (WebAuthn PRF). The OpenPGP cryptography runs in the browser, and private keys are only stored in protected form.
-- **Calendar and contacts** from any CalDAV/CardDAV server, with recipient autocomplete from your address books
+- **Calendar and contacts** from any CalDAV/CardDAV server, with recipient autocomplete from your address books. Month, week and day views; drag across days or times to create an event there. Calendars shared with you and those of people who made you their delegate can be turned on and off, and you can subscribe to published internet calendars (webcal/.ics) and public CalDAV calendars
 - **Tasks and notes** kept on the same CalDAV server (as VTODOs and VJOURNALs), so they sync with other CalDAV apps. If none of your calendars accept them, the app can create a task list or notes list for you
 - **Files** from a WebDAV server
 - **Filters** via ManageSieve, with a Sieve script editor
@@ -91,6 +91,8 @@ All settings can be provided as environment variables (`Section__Key`) or in `ap
 | `Kestrel__Endpoints__Http__Url` | `http://+:8080` in Docker | Listening address |
 
 Any standards-compliant CalDAV/CardDAV server works as the calendar, tasks, notes and contacts backend, for example Nullify.CalDav. Notes need a calendar collection that accepts VJOURNAL; some servers' default calendars only take events and tasks, in which case the Notes page offers to create one (MKCALENDAR).
+
+Calendars can be shared with other people from the calendar list when the server supports sharing over CalDAV: WebDAV resource sharing (`DAV: resource-sharing`) or CalendarServer sharing (`DAV: calendarserver-sharing`, as SabreDAV, Nextcloud and iCloud offer). Servers without either (Nullify.CalDav, Radicale) manage sharing in their own interface. Internet calendars are fetched by the WebMail server, which only connects to public internet addresses, apart from the user's own CalDAV server.
 
 ## Development
 
