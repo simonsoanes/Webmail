@@ -261,63 +261,250 @@ window.nullifyApp = (() => {
         confirm(message) { return window.confirm(message); },
 
         /**
-         * Drag across days ([data-day]) or times ([data-slot]) on the calendar to highlight them.
-         * The drag is painted here, without round trips; the calendar hears of the range when the
-         * button goes up: OnCalendarRange(kind, from, to) with the first and last cells' keys.
-         * A click on a time slot is reported the same way (from == to); clicks on days are left to
-         * the calendar. Touch only taps, so the page still scrolls.
+         * Pointer work on the calendar, painted here without round trips and reported when the
+         * button goes up:
+         * - Drag across days ([data-day]) to highlight them: OnCalendarRange('day', first, last).
+         * - Drag down the time grid (.tg-col[data-date]) to highlight a stretch of time, from the
+         *   half hour where the drag began to the half-hour line nearest the pointer, exactly as
+         *   painted: OnCalendarRange('slot', start, end). A click reports start == end.
+         * - Drag an event ([data-ev]) to another day, OnEventDrop(key, 'day', fromDay, toDay), or on
+         *   the time grid to another time, OnEventDrop(key, 'time', start, end); dragging its bottom
+         *   edge (.tg-resize) changes when it ends. Esc cancels.
+         * Clicks on days and events are left to the calendar. Touch only taps, so the page still scrolls.
          */
         calendarSelect(root, ref) {
             if (!root) return;
             if (root._calSel) { root._calSel.ref = ref; return; }
-            const s = root._calSel = { ref, kind: null, anchor: null, current: null, moved: false, swallow: false, touch: false };
-            const key = (el) => s.kind === 'slot' ? el.dataset.slot : el.dataset.day;
-            const selector = () => s.kind === 'slot' ? '[data-slot]' : '[data-day]';
-            const paint = () => {
-                const a = key(s.anchor), b = key(s.current);
-                const [lo, hi] = a <= b ? [a, b] : [b, a];
-                root.querySelectorAll(selector()).forEach(el => {
-                    const k = key(el);
-                    el.classList.toggle('sel-drag', s.moved && k >= lo && k <= hi);
-                });
+            const s = root._calSel = { ref, sel: null, drag: null, swallow: false };
+            const pad = (n) => String(n).padStart(2, '0');
+            const dayKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+            const hhmm = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            const fmt = (d) => `${dayKey(d)}T${hhmm(d)}`;
+            const parse = (text) => {
+                const [date, time = '00:00'] = text.split('T');
+                const [y, m, d] = date.split('-').map(Number);
+                const [h, mi] = time.split(':').map(Number);
+                return new Date(y, m - 1, d, h, mi);
             };
-            const clear = () => root.querySelectorAll('.sel-drag').forEach(el => el.classList.remove('sel-drag'));
-            root.addEventListener('pointerdown', (e) => {
-                if (e.button !== 0 || e.target.closest('button, a, input, select, .tg-event, .sel-toolbar')) return;
-                const cell = e.target.closest('[data-day], [data-slot]');
-                if (!cell || !root.contains(cell)) return;
-                s.kind = cell.dataset.slot ? 'slot' : 'day';
-                s.anchor = s.current = cell;
-                s.moved = false;
-                s.touch = e.pointerType === 'touch';
-            });
-            window.addEventListener('pointermove', (e) => {
-                if (!s.anchor || s.touch) return;
-                const hit = document.elementFromPoint(e.clientX, e.clientY);
-                const cell = hit && hit.closest(selector());
-                if (!cell || !root.contains(cell) || cell === s.current) return;
-                s.current = cell;
-                s.moved = true;
-                paint();
-            });
-            window.addEventListener('pointerup', () => {
-                if (!s.anchor) return;
-                const from = key(s.anchor), to = key(s.current), kind = s.kind, moved = s.moved;
-                s.anchor = s.current = null;
-                if (moved) {
-                    // The click that follows a drag isn't a click on a day (it comes straight after, if at all).
-                    s.swallow = true;
-                    setTimeout(() => { s.swallow = false; }, 0);
+            const at = (date, minutes) => { const d = parse(date); d.setMinutes(Math.round(minutes)); return d; };
+            const addMin = (d, n) => new Date(d.getTime() + n * 60000);
+            const quarter = 15 * 60000;
+            const hitAt = (x, y, selector) => {
+                const hit = document.elementFromPoint(x, y);
+                const el = hit && hit.closest(selector);
+                return el && root.contains(el) ? el : null;
+            };
+            const minutesIn = (col, y) => {
+                const r = col.getBoundingClientRect();
+                return Math.max(0, Math.min(1440, (y - r.top) / r.height * 1440));
+            };
+            const far = (e, from) => Math.hypot(e.clientX - from.x, e.clientY - from.y) >= 4;
+            const swallowClick = () => { s.swallow = true; setTimeout(() => { s.swallow = false; }, 0); };
+            const clearPaint = () => root.querySelectorAll('.sel-drag, .drop-target').forEach(el => el.classList.remove('sel-drag', 'drop-target'));
+            const call = (method, ...args) => s.ref ? s.ref.invokeMethodAsync(method, ...args) : Promise.resolve();
+
+            // ---- highlighting days and times
+
+            const range = (v) => {
+                if (v.kind === 'day') return v.anchor <= v.current ? [v.anchor, v.current] : [v.current, v.anchor];
+                const slotEnd = addMin(v.anchor, 30);
+                return v.current > v.anchor ? [v.anchor, v.current > slotEnd ? v.current : slotEnd] : [v.current, slotEnd];
+            };
+            const paintSelection = () => {
+                const [lo, hi] = range(s.sel);
+                if (s.sel.kind === 'day') {
+                    root.querySelectorAll('[data-day]').forEach(el => el.classList.toggle('sel-drag', el.dataset.day >= lo && el.dataset.day <= hi));
+                } else {
+                    root.querySelectorAll('[data-slot]').forEach(el => {
+                        const t = parse(el.dataset.slot);
+                        el.classList.toggle('sel-drag', t >= lo && t < hi);
+                    });
                 }
-                if ((moved || kind === 'slot') && s.ref) s.ref.invokeMethodAsync('OnCalendarRange', kind, from, to).finally(clear);
-                else clear();
+            };
+
+            // ---- moving and resizing events
+
+            const ghostFor = (d) => {
+                const g = document.createElement('div');
+                g.className = 'cal-ghost' + (d.timed ? ' timed' : '');
+                g.style.setProperty('--cal', d.el.style.getPropertyValue('--cal'));
+                if (d.timed) {
+                    const title = document.createElement('span');
+                    title.className = 'ev-title';
+                    title.textContent = (d.el.querySelector('.ev-title') || d.el).textContent;
+                    const time = document.createElement('span');
+                    time.className = 'ev-time';
+                    g.append(title, time);
+                } else {
+                    g.append(...[...d.el.childNodes].map(n => n.cloneNode(true)));
+                    g.style.width = d.el.getBoundingClientRect().width + 'px';
+                }
+                document.body.appendChild(g);
+                return g;
+            };
+            const placeTimed = (d) => {
+                const col = root.querySelector(`.tg-col[data-date="${dayKey(d.newStart)}"]`) || d.col;
+                const r = col.getBoundingClientRect();
+                const view = (col.closest('.tg-scroll') || col).getBoundingClientRect();
+                const dayStart = at(col.dataset.date, 0);
+                const startMin = Math.max(0, (d.newStart - dayStart) / 60000);
+                const endMin = Math.min(1440, Math.max(startMin + 15, (d.newEnd - dayStart) / 60000));
+                const top = Math.max(view.top, r.top + startMin / 1440 * r.height);
+                const bottom = Math.min(view.bottom, r.top + endMin / 1440 * r.height);
+                Object.assign(d.ghost.style, { left: r.left + 1 + 'px', width: r.width - 3 + 'px', top: top + 'px', height: Math.max(bottom - top, 4) + 'px' });
+                d.ghost.querySelector('.ev-time').textContent = `${hhmm(d.newStart)} – ${hhmm(d.newEnd)}`;
+            };
+            const endDrag = (d) => {
+                if (d.ghost) d.ghost.remove();
+                d.el.classList.remove('drag-src');
+                document.documentElement.classList.remove('cal-moving', 'cal-resizing');
+                clearPaint();
+            };
+
+            root.addEventListener('pointerdown', (e) => {
+                if (e.button !== 0 || s.drag || s.sel) return;
+                const touch = e.pointerType === 'touch';
+                const evEl = e.target.closest('[data-ev]');
+                if (evEl && root.contains(evEl)) {
+                    if (touch) return;
+                    const col = evEl.closest('.tg-col[data-date]');
+                    const d = { el: evEl, key: evEl.dataset.ev, x: e.clientX, y: e.clientY, started: false, timed: !!col, col };
+                    if (col) {
+                        d.start = parse(evEl.dataset.start);
+                        d.end = parse(evEl.dataset.end);
+                        d.resize = !!e.target.closest('.tg-resize');
+                        d.grab = (at(col.dataset.date, minutesIn(col, e.clientY)) - d.start) / 60000;
+                    } else {
+                        const cell = evEl.closest('[data-day]');
+                        if (!cell) return;
+                        d.from = cell.dataset.day;
+                        const r = evEl.getBoundingClientRect();
+                        d.offset = { x: e.clientX - r.left, y: e.clientY - r.top };
+                    }
+                    s.drag = d;
+                    return;
+                }
+                if (e.target.closest('button, a, input, select, .tg-event, .sel-toolbar')) return;
+                const cell = e.target.closest('[data-day], .tg-col[data-date]');
+                if (!cell || !root.contains(cell)) return;
+                if (cell.dataset.day) {
+                    s.sel = { kind: 'day', anchor: cell.dataset.day, current: cell.dataset.day, x: e.clientX, y: e.clientY, moved: false, touch };
+                } else {
+                    const start = at(cell.dataset.date, Math.floor(minutesIn(cell, e.clientY) / 30) * 30);
+                    s.sel = { kind: 'slot', anchor: start, current: start, x: e.clientX, y: e.clientY, moved: false, touch };
+                }
             });
-            window.addEventListener('pointercancel', () => { s.anchor = s.current = null; clear(); });
+
+            window.addEventListener('pointermove', (e) => {
+                const v = s.sel;
+                if (v) {
+                    if (v.touch || (!v.moved && !far(e, v))) return;
+                    if (v.kind === 'day') {
+                        const cell = hitAt(e.clientX, e.clientY, '[data-day]');
+                        if (!cell) return;
+                        v.current = cell.dataset.day;
+                    } else {
+                        const col = hitAt(e.clientX, e.clientY, '.tg-col[data-date]');
+                        if (!col) return;
+                        v.current = at(col.dataset.date, Math.round(minutesIn(col, e.clientY) / 30) * 30);
+                    }
+                    v.moved = true;
+                    paintSelection();
+                    return;
+                }
+                const d = s.drag;
+                if (!d || d.cancelled) return;
+                if (!d.started) {
+                    if (!far(e, d)) return;
+                    d.started = true;
+                    d.el.classList.add('drag-src');
+                    d.ghost = ghostFor(d);
+                    document.documentElement.classList.add(d.resize ? 'cal-resizing' : 'cal-moving');
+                }
+                if (d.timed) {
+                    if (d.resize) {
+                        let end = at(d.col.dataset.date, Math.round(minutesIn(d.col, e.clientY) / 15) * 15);
+                        if (end < addMin(d.start, 15)) end = addMin(d.start, 15);
+                        d.newStart = d.start;
+                        d.newEnd = end;
+                    } else {
+                        const col = hitAt(e.clientX, e.clientY, '.tg-col[data-date]');
+                        if (col) {
+                            const pointer = at(col.dataset.date, minutesIn(col, e.clientY));
+                            d.newStart = new Date(Math.round(addMin(pointer, -d.grab) / quarter) * quarter);
+                            d.newEnd = new Date(d.newStart.getTime() + (d.end - d.start));
+                        }
+                    }
+                    if (d.newStart) placeTimed(d);
+                } else {
+                    Object.assign(d.ghost.style, { left: e.clientX - d.offset.x + 'px', top: e.clientY - d.offset.y + 'px' });
+                    const cell = hitAt(e.clientX, e.clientY, '[data-day]');
+                    if (cell) d.to = cell.dataset.day;
+                    root.querySelectorAll('[data-day]').forEach(el => el.classList.toggle('drop-target', !!cell && el === cell));
+                }
+            });
+
+            window.addEventListener('pointerup', () => {
+                const v = s.sel;
+                if (v) {
+                    s.sel = null;
+                    if (v.moved) swallowClick();
+                    if (v.kind === 'day') {
+                        // A click on a day is the calendar's to handle.
+                        if (!v.moved) return clearPaint();
+                        const [lo, hi] = range(v);
+                        call('OnCalendarRange', 'day', lo, hi).finally(clearPaint);
+                    } else {
+                        const [lo, hi] = v.moved ? range(v) : [v.anchor, v.anchor];
+                        call('OnCalendarRange', 'slot', fmt(lo), fmt(hi)).finally(clearPaint);
+                    }
+                    return;
+                }
+                const d = s.drag;
+                if (!d) return;
+                s.drag = null;
+                if (!d.started) return; // a click: the calendar opens the event
+                swallowClick();
+                if (d.cancelled) return;
+                let args = null;
+                if (d.timed && d.newStart && (+d.newStart !== +d.start || +d.newEnd !== +d.end)) args = ['time', fmt(d.newStart), fmt(d.newEnd)];
+                else if (!d.timed && d.to && d.to !== d.from) args = ['day', d.from, d.to];
+                // The ghost stays where it was dropped until the calendar has saved and redrawn.
+                if (args) call('OnEventDrop', d.key, ...args).finally(() => endDrag(d));
+                else endDrag(d);
+            });
+
+            window.addEventListener('pointercancel', () => {
+                if (s.drag) endDrag(s.drag);
+                s.sel = s.drag = null;
+                clearPaint();
+            });
+
+            window.addEventListener('keydown', (e) => {
+                if (e.key !== 'Escape') return;
+                if (s.drag && s.drag.started && !s.drag.cancelled) {
+                    s.drag.cancelled = true;
+                    endDrag(s.drag);
+                } else if (s.sel) {
+                    s.sel = null;
+                    clearPaint();
+                }
+            });
+
             root.addEventListener('click', (e) => {
                 if (!s.swallow) return;
                 s.swallow = false;
                 e.stopPropagation();
             }, true);
+        },
+
+        /** Scroll a list so the rows under a sticky letter heading ([data-letter]) start at its top. */
+        jumpToLetter(list, letter) {
+            if (!list) return;
+            const head = [...list.querySelectorAll('[data-letter]')].find(h => h.dataset.letter === letter);
+            if (!head) return;
+            const row = head.nextElementSibling || head;
+            list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top - head.offsetHeight;
         },
 
         /** Scroll the time grid so that a time of day (minutes after midnight) is near the top. */

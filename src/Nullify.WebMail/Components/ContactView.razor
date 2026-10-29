@@ -79,7 +79,9 @@
                 </div>
 
                 var matches = Filtered().ToList();
-                <div class="contact-rows">
+                var groups = matches.GroupBy(c => Letter(c.FullName)).ToList();
+                <div class="contact-rows-wrap">
+                <div class="contact-rows" @ref="rowsEl">
                     @if (matches.Count == 0)
                     {
                         <div class="empty-state">
@@ -88,9 +90,9 @@
                             <p>@(query.Length > 0 ? $"Nobody matches \"{query}\"." : "Add your first contact with New.")</p>
                         </div>
                     }
-                    @foreach (var group in matches.GroupBy(c => Letter(c.FullName)))
+                    @foreach (var group in groups)
                     {
-                        <div class="contact-letter">@group.Key</div>
+                        <div class="contact-letter" data-letter="@group.Key">@group.Key</div>
                         @foreach (var c in group)
                         {
                             var contact = c;
@@ -103,6 +105,18 @@
                             </button>
                         }
                     }
+                </div>
+                @if (groups.Count > 1)
+                {
+                    var present = groups.Select(g => g.Key).ToHashSet();
+                    <nav class="letter-rail" aria-label="Jump to a letter">
+                        @foreach (var letter in RailLetters(present))
+                        {
+                            var l = letter;
+                            <button disabled="@(!present.Contains(l))" title="@l" aria-label="Jump to @l" @onclick="() => JumpTo(l)">@l</button>
+                        }
+                    </nav>
+                }
                 </div>
             }
         </section>
@@ -220,6 +234,8 @@
 </div>
 
 @code {
+    private ElementReference rowsEl;
+
     private enum Status { Loading, Ready, NotConfigured, NeedsReentry, Error }
 
     private ContactList? list;
@@ -355,6 +371,20 @@
     {
         var first = name.TrimStart().FirstOrDefault();
         return char.IsLetter(first) ? char.ToUpperInvariant(first).ToString() : "#";
+    }
+
+    /// <summary>A–Z, then any other initials in use (accented letters, other scripts), then # for the rest.</summary>
+    private static IEnumerable<string> RailLetters(IReadOnlySet<string> present)
+    {
+        var az = Enumerable.Range('A', 26).Select(c => ((char)c).ToString()).ToList();
+        return az.Concat(present.Where(l => l != "#" && !az.Contains(l)).Order(StringComparer.CurrentCulture))
+            .Concat(present.Contains("#") ? ["#"] : []);
+    }
+
+    private async Task JumpTo(string letter)
+    {
+        try { await JS.InvokeVoidAsync("nullifyApp.jumpToLetter", rowsEl, letter); }
+        catch (JSException) { /* list gone */ }
     }
 
     private static string FormatBirthday(string raw)

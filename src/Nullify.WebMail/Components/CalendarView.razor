@@ -195,7 +195,7 @@
                             var d = date;
                             var cut = selection is { AllDay: false } sel ? Clip(sel, d) : null;
                             var lastSelected = cut != null && DateOnly.FromDateTime(selection!.Value.End.AddTicks(-1)) == d;
-                            <div class="tg-col @(d == today ? "today" : "")">
+                            <div class="tg-col @(d == today ? "today" : "")" data-date="@Key(d)">
                                 @for (var slot = 0; slot < 48; slot++)
                                 {
                                     <div class="tg-slot @(slot % 2 == 0 ? "hour" : "")" data-slot="@SlotKey(d, slot)"></div>
@@ -212,11 +212,17 @@
                                 @foreach (var p in CalendarLayout.Day(EventsOn(d).Where(InGrid), ev => (Local(ev.Start), Local(ev.End)), d))
                                 {
                                     var item = p.Item;
-                                    <button class="tg-event @(openEvent == item ? "open" : "")"
+                                    var movable = CanEdit(item);
+                                    <button class="tg-event @(openEvent == item ? "open" : "")" data-ev="@(movable ? EventKey(item) : null)"
+                                            data-start="@(movable ? WallKey(Local(item.Start)) : null)" data-end="@(movable ? WallKey(Local(item.End)) : null)"
                                             style="--cal:@ColorOf(item.CalendarId);top:@Pct(p.Top);height:@Pct(p.Height);left:calc(@Pct(p.Column * 100.0 / p.Columns) + 1px);width:calc(@Pct(100.0 / p.Columns) - 3px)"
                                             title="@ChipTitle(item)" @onclick="() => OpenEvent(d, item)" @ondblclick="() => EditEvent(item)" @ondblclick:stopPropagation="true">
                                         <span class="ev-title">@item.Summary</span>
                                         <span class="ev-time">@TimeRange(item, d)</span>
+                                        @if (movable && DateOnly.FromDateTime(Local(item.End).AddTicks(-1)) == d)
+                                        {
+                                            <span class="tg-resize" title="Drag to change when it ends" aria-hidden="true"></span>
+                                        }
                                     </button>
                                 }
                                 @if (d == today)
@@ -585,6 +591,11 @@
     private static string SlotKey(DateOnly d, int slot) =>
         d.ToDateTime(new TimeOnly(slot / 2, slot % 2 * 30)).ToString("yyyy-MM-dd'T'HH':'mm", Inv);
 
+    private static string WallKey(DateTime t) => t.ToString("yyyy-MM-dd'T'HH':'mm", Inv);
+
+    /// <summary>Identifies an event (one occurrence of a series) to the browser for dragging.</summary>
+    private static string EventKey(CalendarEvent ev) => $"{ev.CalendarId}|{ev.Uid}|{ev.OccurrenceId?.UtcTicks}";
+
     private static string Pct(double value) => value.ToString("0.###", Inv) + "%";
 
     private string TimeRange(CalendarEvent ev, DateOnly day)
@@ -617,7 +628,7 @@
         ev.Summary + (ev.AllDay ? "" : $" ({Local(ev.Start):HH:mm}–{Local(ev.End):HH:mm})") + (ev.Location != null ? $" · {ev.Location}" : "");
 
     private RenderFragment<(DateOnly Day, CalendarEvent Event)> Chip => x =>
-        @<button class="ev-chip @(x.Event.AllDay ? "allday" : "")" style="--cal:@ColorOf(x.Event.CalendarId)"
+        @<button class="ev-chip @(x.Event.AllDay ? "allday" : "")" style="--cal:@ColorOf(x.Event.CalendarId)" data-ev="@(CanEdit(x.Event) ? EventKey(x.Event) : null)"
                  title="@ChipTitle(x.Event)" @onclick="() => OpenEvent(x.Day, x.Event)" @ondblclick="() => EditEvent(x.Event)"
                  @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">
             @if (!x.Event.AllDay) { <span class="ev-time">@Local(x.Event.Start).ToString("HH:mm")</span> }
@@ -689,14 +700,93 @@
             if (!DateTime.TryParseExact(from, format, Inv, System.Globalization.DateTimeStyles.None, out var a) ||
                 !DateTime.TryParseExact(to, format, Inv, System.Globalization.DateTimeStyles.None, out var b)) return;
             if (b < a) (a, b) = (b, a);
-            // A click picks an hour (to the end of the day at most); a drag covers the half hours it crossed.
-            var end = a == b ? (a.AddHours(1) < a.Date.AddDays(1) ? a.AddHours(1) : a.Date.AddDays(1)) : b.AddMinutes(30);
+            // A click picks an hour (to the end of the day at most); a drag gives the exact start and end it painted.
+            var end = a == b ? (a.AddHours(1) < a.Date.AddDays(1) ? a.AddHours(1) : a.Date.AddDays(1)) : b;
             selection = new CalendarSlot(a, end, AllDay: false);
             selectedDay = DateOnly.FromDateTime(a);
         }
         openEvent = null;
         StateHasChanged();
     });
+
+    /// <summary>
+    /// An event dragged to another day ("day": from and to are the days it left and landed on) or,
+    /// on the time grid, moved or resized ("time": its new start and end, local wall-clock).
+    /// </summary>
+    [JSInvokable]
+    public Task OnEventDrop(string key, string kind, string from, string to) => InvokeAsync(async () =>
+    {
+        var ev = events.FirstOrDefault(e => EventKey(e) == key);
+        if (ev == null || !CanEdit(ev)) return;
+        DateTime start, end;
+        if (kind == "day")
+        {
+            if (!DateOnly.TryParseExact(from, "yyyy-MM-dd", Inv, System.Globalization.DateTimeStyles.None, out var a) ||
+                !DateOnly.TryParseExact(to, "yyyy-MM-dd", Inv, System.Globalization.DateTimeStyles.None, out var b)) return;
+            var days = b.DayNumber - a.DayNumber;
+            if (days == 0) return;
+            if (ev.AllDay)
+            {
+                // All-day dates are UTC midnights with an exclusive end; the editor's end is the last day.
+                start = ev.Start.UtcDateTime.Date.AddDays(days);
+                end = ev.End.UtcDateTime.Date.AddDays(days - 1);
+                if (end < start) end = start;
+            }
+            else
+            {
+                start = Local(ev.Start).AddDays(days);
+                end = Local(ev.End).AddDays(days);
+            }
+        }
+        else
+        {
+            const string format = "yyyy-MM-dd'T'HH':'mm";
+            if (ev.AllDay ||
+                !DateTime.TryParseExact(from, format, Inv, System.Globalization.DateTimeStyles.None, out start) ||
+                !DateTime.TryParseExact(to, format, Inv, System.Globalization.DateTimeStyles.None, out end) || end <= start) return;
+        }
+        await MoveEvent(ev, start, end);
+        StateHasChanged();
+    });
+
+    /// <summary>Save an event at new times, as the editor would; for a series this moves every occurrence.</summary>
+    private async Task MoveEvent(CalendarEvent ev, DateTime start, DateTime end)
+    {
+        try
+        {
+            if (ev.Organizer is { } org && ev.Attendees.Count > 0 && !IsMine(org.Email))
+            {
+                State.ShowToast($"{org.Display} organises this meeting, so only they can move it.", isError: true);
+                return;
+            }
+            var repeat = EventRepeat.None;
+            if (ev.IsRecurring)
+            {
+                repeat = await CalDav.GetRepeatAsync(ev);
+                if (repeat == EventRepeat.None)
+                {
+                    State.ShowToast("This event repeats in a way that can't be changed here.", isError: true);
+                    return;
+                }
+                if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", "This event repeats. Change every occurrence?")) return;
+            }
+            var notify = ev.Organizer != null && ev.Attendees.Count > 0 &&
+                         await JS.InvokeAsync<bool>("nullifyApp.confirm", "Email the guests about the new time?");
+
+            var edit = new EventEdit(ev.Summary == "(no title)" ? "" : ev.Summary, ev.Location, ev.Description, ev.AllDay, start, end, repeat);
+            var (before, after) = await CalDav.SaveEventAsync(ev, edit, ev.CalendarId!, State.TimeZone);
+            var sent = notify ? await Notify(Scheduling.ForSave(before, after, Mine)) : 0;
+            if (sent >= 0) State.ShowToast("Event moved" + (sent > 0 ? " and guests emailed" : ""));
+            openEvent = null;
+            selectedDay = DateOnly.FromDateTime(start);
+        }
+        catch (Exception ex) when (ex is CalDavException or InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            State.ShowToast($"Couldn't move it: {(ex is TaskCanceledException ? "the server did not respond in time." : ex.Message)}", isError: true);
+        }
+        catch (JSException) { return; }
+        await Load();
+    }
 
     /// <summary>The part of a timed selection on a day, as percentages of its height.</summary>
     private static (double Top, double Height)? Clip(CalendarSlot s, DateOnly d)

@@ -868,7 +868,8 @@ select.compact { width: auto; }
 /* highlighted days / times, and the toolbar that floats over them */
 .calendar-cell.in-range, .calendar-cell.sel-drag, .tg-allday-cell.in-range, .tg-allday-cell.sel-drag { background: color-mix(in srgb, var(--accent) 16%, var(--surface)); }
 .calendar-cell.in-range.muted { background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
-.tg-slot.sel-drag { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+/* :hover too, or the slot under the pointer would look left out of the highlight */
+.tg-slot.sel-drag, .tg-slot.sel-drag:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .sel-toolbar {
     position: absolute; z-index: 6; display: inline-flex; align-items: center; gap: 4px; padding: 3px 3px 3px .6rem;
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: var(--shadow-lg);
@@ -931,6 +932,26 @@ select.compact { width: auto; }
 .tg-event > span { flex-shrink: 0; } /* short events clip the time, not the title */
 .tg-event .ev-title { font-weight: 600; max-width: 100%; }
 .tg-event .ev-time { font-size: .7rem; }
+/* moving and resizing events */
+.tg-resize { position: absolute; left: 0; right: 0; bottom: 0; height: 7px; cursor: ns-resize; }
+.tg-resize::after {
+    content: ""; position: absolute; left: 50%; bottom: 2px; width: 18px; height: 3px; margin-left: -9px; border-radius: 2px;
+    background: color-mix(in srgb, var(--cal) 70%, var(--text)); opacity: 0; transition: opacity .1s;
+}
+.tg-event:hover .tg-resize::after, .tg-event.open .tg-resize::after { opacity: .8; }
+.drag-src { opacity: .35; }
+.cal-ghost {
+    --cal: var(--accent);
+    position: fixed; z-index: 600; pointer-events: none; display: flex; align-items: center; gap: .3rem; min-width: 0; overflow: hidden;
+    padding: 1px .35rem; border-radius: 5px; font-size: .74rem; line-height: 1.45; color: var(--text);
+    background: color-mix(in srgb, var(--cal) 30%, var(--surface)); box-shadow: var(--shadow-lg); opacity: .95;
+}
+.cal-ghost.timed { flex-direction: column; align-items: flex-start; padding: 2px .4rem; line-height: 1.3; border-left: 3px solid var(--cal); }
+.cal-ghost .ev-title { font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cal-ghost .ev-time { font-size: .7rem; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.calendar-cell.drop-target, .tg-allday-cell.drop-target { box-shadow: inset 0 0 0 2px var(--accent); background: var(--accent-soft); }
+:root.cal-moving, :root.cal-moving * { cursor: grabbing !important; user-select: none; }
+:root.cal-resizing, :root.cal-resizing * { cursor: ns-resize !important; user-select: none; }
 .tg-now { position: absolute; left: 0; right: 0; z-index: 4; height: 2px; background: var(--danger); pointer-events: none; }
 .tg-now::before { content: ""; position: absolute; left: -5px; top: -4px; width: 10px; height: 10px; border-radius: 50%; background: var(--danger); }
 
@@ -1056,7 +1077,15 @@ select.compact { width: auto; }
 .pane-head { display: flex; align-items: center; gap: .5rem; padding: .85rem 1rem .5rem; min-height: 56px; }
 .pane-head h2 { font-size: 1.15rem; font-weight: 700; letter-spacing: -.01em; }
 .pane-pad { padding: 0 1rem .5rem; }
-.contact-rows { flex: 1; overflow-y: auto; padding: 0 .5rem .75rem; }
+.contact-rows-wrap { flex: 1; min-height: 0; display: flex; }
+.contact-rows { flex: 1; min-width: 0; overflow-y: auto; padding: 0 .5rem .75rem; }
+.letter-rail { flex: none; display: flex; flex-direction: column; justify-content: center; padding: .25rem .2rem .25rem 0; overflow: hidden; }
+.letter-rail button {
+    flex: 0 1 auto; min-height: 0; padding: 1px 5px; border-radius: 4px; line-height: 1.15;
+    font-size: .66rem; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums;
+}
+.letter-rail button:hover:not(:disabled) { background: var(--accent-soft); }
+.letter-rail button:disabled { color: var(--faint); opacity: .55; cursor: default; }
 .contact-letter { position: sticky; top: 0; background: var(--surface); padding: .55rem .5rem .2rem; font-size: .72rem; font-weight: 700; color: var(--faint); letter-spacing: .05em; z-index: 1; }
 .contact-row { display: flex; align-items: center; gap: .7rem; width: 100%; padding: .45rem .5rem; border-radius: var(--radius-sm); border: none; text-align: left; }
 .contact-row:hover { background: var(--surface-2); }
@@ -1153,7 +1182,7 @@ img.avatar { object-fit: cover; background: var(--surface-3); }
 
 /* shared filter chips (address books) */
 .filter-chips { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .6rem; }
-.filter-chip { height: 28px; padding: 0 .75rem; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); font-size: .8rem; color: var(--muted); }
+.filter-chip { display: inline-flex; align-items: center; gap: .3rem; white-space: nowrap; height: 28px; padding: 0 .75rem; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); font-size: .8rem; color: var(--muted); }
 .filter-chip:hover { border-color: var(--faint); color: var(--text); }
 .filter-chip.on { background: var(--selected); border-color: transparent; color: var(--accent); font-weight: 600; }
 
