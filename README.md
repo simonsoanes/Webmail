@@ -92,7 +92,7 @@ All settings can be provided as environment variables (`Section__Key`) or in `ap
 
 Any standards-compliant CalDAV/CardDAV server works as the calendar, tasks, notes and contacts backend, for example Nullify.CalDav. Notes need a calendar collection that accepts VJOURNAL; some servers' default calendars only take events and tasks, in which case the Notes page offers to create one (MKCALENDAR).
 
-Calendars can be shared with other people from the calendar list when the server supports sharing over CalDAV: WebDAV resource sharing (`DAV: resource-sharing`) or CalendarServer sharing (`DAV: calendarserver-sharing`, as SabreDAV, Nextcloud and iCloud offer). Servers without either (Nullify.CalDav, Radicale) manage sharing in their own interface. Internet calendars are fetched by the WebMail server, which only connects to public internet addresses, apart from the user's own CalDAV server.
+Calendars can be shared with other people from the calendar list when the server supports sharing over CalDAV: WebDAV resource sharing (`DAV: resource-sharing`) or CalendarServer sharing (`DAV: calendarserver-sharing`, as SabreDAV, Nextcloud and iCloud offer). Nullify.CalDav supports both; servers with neither (Radicale, for example) manage sharing in their own interface. Internet calendars are fetched by the WebMail server, which only connects to public internet addresses, apart from the user's own CalDAV server.
 
 ## Development
 
