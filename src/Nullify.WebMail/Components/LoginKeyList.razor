@@ -1,0 +1,124 @@
+@* Copyright 2026 Simon Soanes
+   SPDX-License-Identifier: Apache-2.0 *@
+@implements IDisposable
+@inject LoginKeyService LoginKeys
+@inject UserSession Session
+@inject AppState State
+@inject IJSRuntime JS
+
+@* One-time sign-in keys (see LoginKeyService): make one, see it once, revoke unused ones. *@
+<div class="trusted-devices">
+    <h4>One-time sign-in keys</h4>
+    <p class="muted">
+        A key you type instead of your password, for a computer you'd rather not type your password on.
+        Each key works once and expires after at most @((int)LoginKeyService.MaxLifetime.TotalMinutes) minutes.
+        Your password is kept encrypted with the key, so this server can't read it until the key is used.
+    </p>
+
+    @if (created is { } k && k.ExpiresUtc > DateTime.UtcNow)
+    {
+        <div class="login-key-new" role="status">
+            <code class="login-key-code" aria-label="Your new sign-in key">@k.Key</code>
+            <div class="login-key-actions">
+                <button class="btn small" @onclick="Copy"><Icon Name="copy" Size="14" /> Copy</button>
+                <button class="btn small ghost" @onclick="() => created = null">Done</button>
+            </div>
+            <span class="help">Sign in with your email address and this key as the password, before @Time(k.ExpiresUtc). It won't be shown again.</span>
+        </div>
+    }
+
+    @if (keys.Count > 0)
+    {
+        <ul class="device-list">
+            @foreach (var key in keys)
+            {
+                <li>
+                    <Icon Name="key" Size="16" />
+                    <div>
+                        <strong>Unused key @if (key.Id == created?.Id) { <span class="tag">Just made</span> }</strong>
+                        <span>Made @Time(key.CreatedUtc) · expires @Time(key.ExpiresUtc)</span>
+                    </div>
+                    <button class="btn small danger" @onclick="() => Revoke(key.Id)">Revoke</button>
+                </li>
+            }
+        </ul>
+        @if (keys.Count > 1)
+        {
+            <button class="btn small ghost danger" @onclick="() => Revoke(null)">Revoke all</button>
+        }
+    }
+
+    @if (Session.IsQrSession || Session.IsLoginKeySession)
+    {
+        <p class="muted">Keys can't be made on a computer that was signed in @(Session.IsQrSession ? "by your phone" : "with a key").</p>
+    }
+    else
+    {
+        <div class="login-key-make">
+            <label for="lk-life">Valid for</label>
+            <select id="lk-life" @bind="minutes">
+                @foreach (var m in Lifetimes) { <option value="@m">@m minutes</option> }
+            </select>
+            <button class="btn small" disabled="@(keys.Count >= LoginKeyService.MaxPerUser)" @onclick="Create">
+                <Icon Name="plus" Size="14" /> <span>Make a key</span>
+            </button>
+        </div>
+    }
+</div>
+
+@code {
+    private static readonly int[] Lifetimes = [5, 10, 15, 30];
+
+    private IReadOnlyList<LoginKeyInfo> keys = [];
+    private NewLoginKey? created;
+    private int minutes = 10;
+    private Timer? timer;
+
+    protected override void OnInitialized()
+    {
+        Load();
+        // Expired keys drop off the list on their own.
+        timer = new Timer(_ => InvokeAsync(() => { Load(); StateHasChanged(); }), null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+    }
+
+    private void Load()
+    {
+        keys = Session.Credential == null ? [] : LoginKeys.List(Session.Credential.Login);
+        if (created != null && created.ExpiresUtc <= DateTime.UtcNow) created = null;
+    }
+
+    private void Create()
+    {
+        if (Session.Credential is not { } cred || Session.IsQrSession || Session.IsLoginKeySession) return;
+        try
+        {
+            created = LoginKeys.Create(cred.Login, cred.Password, TimeSpan.FromMinutes(minutes));
+        }
+        catch (InvalidOperationException ex)
+        {
+            State.ShowToast(ex.Message, isError: true);
+        }
+        Load();
+    }
+
+    private async Task Copy()
+    {
+        if (created == null) return;
+        var ok = await JS.InvokeAsync<bool>("nullifyApp.copyText", created.Key);
+        State.ShowToast(ok ? "Key copied" : "Couldn't copy it; select the key and copy it instead", isError: !ok);
+    }
+
+    private void Revoke(string? id)
+    {
+        if (Session.Credential == null) return;
+        var n = LoginKeys.Revoke(Session.Credential.Login, id);
+        if (id == null || id == created?.Id) created = null;
+        State.ShowToast(n == 1 ? "Key revoked" : $"{n} keys revoked");
+        Load();
+    }
+
+    private string Time(DateTime utc) =>
+        TimeZoneInfo.ConvertTime(new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc)), State.TimeZone).ToString("HH:mm");
+
+    public void Dispose() => timer?.Dispose();
+}

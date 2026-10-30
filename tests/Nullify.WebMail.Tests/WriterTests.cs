@@ -139,6 +139,46 @@ public class WriterTests
     }
 
     [TestMethod]
+    public void NewEvent_WritesReminders_AsDisplayAlarms()
+    {
+        var edit = new EventEdit("Dentist", null, null, false, default, default, EventRepeat.None, Reminders: [60, 1440]);
+        var ics = ICalendarWriter.NewEvent("u3", edit, Timed(11, 3, 9), null);
+
+        StringAssert.Contains(ics, "TRIGGER:-PT1H");
+        StringAssert.Contains(ics, "TRIGGER:-P1D");
+        StringAssert.Contains(ics, "ACTION:DISPLAY");
+        var ev = ICalendar.ParseEvents(ics, TimeZoneInfo.Utc).Single();
+        CollectionAssert.AreEqual(new[] { TimeSpan.FromDays(1), TimeSpan.FromHours(1) }, ev.Alarms);
+    }
+
+    [TestMethod]
+    public void UpdateMaster_NewReminders_ReplaceTheSeriesAlarms_OnlyWhenGiven()
+    {
+        var edit = new EventEdit("Standup", null, null, false, default, default, EventRepeat.Weekly, Reminders: [5]);
+        var updated = ICalendarWriter.UpdateMaster(Series, edit, Timed(10, 19, 9), "FREQ=WEEKLY;BYDAY=MO,WE", dropExceptions: false);
+        Assert.DoesNotContain("TRIGGER:-PT10M", updated);
+        StringAssert.Contains(updated, "TRIGGER:-PT5M");
+        Assert.AreEqual(1, updated.Split("BEGIN:VALARM").Length - 1);
+        var master = ICalendar.ParseEvents(updated, TimeZoneInfo.Utc).Single(e => e.RecurrenceIdWall == null);
+        CollectionAssert.AreEqual(new[] { TimeSpan.FromMinutes(5) }, master.Alarms);
+
+        var none = ICalendarWriter.UpdateMaster(Series, edit with { Reminders = [] }, Timed(10, 19, 9), "FREQ=WEEKLY;BYDAY=MO,WE", dropExceptions: false);
+        Assert.DoesNotContain("VALARM", none);
+        Assert.HasCount(2, ICalendar.ParseEvents(none, TimeZoneInfo.Utc), "The override is kept.");
+    }
+
+    [TestMethod]
+    public void ReminderTriggers_UseTheLargestWholeUnit()
+    {
+        Assert.AreEqual("PT0M", ICalendarWriter.Before(0));
+        Assert.AreEqual("-PT45M", ICalendarWriter.Before(45));
+        Assert.AreEqual("-PT2H", ICalendarWriter.Before(120));
+        Assert.AreEqual("-P2D", ICalendarWriter.Before(2880));
+        Assert.AreEqual("-P1W", ICalendarWriter.Before(10080));
+        Assert.AreEqual("PT30M", ICalendarWriter.Before(-30));
+    }
+
+    [TestMethod]
     public void UpdateMaster_DroppingExceptions_RemovesOverridesAndExdates()
     {
         var edit = new EventEdit("Standup", null, null, false, default, default, EventRepeat.Daily);

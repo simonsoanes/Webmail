@@ -58,6 +58,18 @@
             </div>
 
             <div class="field">
+                <label for="ee-remind">Reminder</label>
+                <select id="ee-remind" @bind="reminder">
+                    <option value="@NoReminder">None</option>
+                    @foreach (var m in ReminderChoices) { <option value="@m">@ReminderLabel(m)</option> }
+                </select>
+                @if (initialReminders.Count > 1 && reminder == initialReminder)
+                {
+                    <span class="help">This event has @initialReminders.Count reminders; they're kept unless you choose another.</span>
+                }
+            </div>
+
+            <div class="field">
                 <label for="ee-loc">Location</label>
                 <input id="ee-loc" @bind="location" @bind:event="oninput" />
             </div>
@@ -199,6 +211,31 @@
     private bool notifyGuests = true, canEditGuests = true, organizerFixed, candidatesRequested;
     private IReadOnlyList<RecipientCandidate>? candidates;
 
+    // reminder: minutes before the start, or NoReminder
+    private const int NoReminder = int.MinValue;
+    private static readonly int[] StandardReminders = [0, 5, 10, 15, 30, 60, 120, 1440, 2880, 10080];
+    private int reminder = NoReminder, initialReminder = NoReminder;
+    private IReadOnlyList<int> initialReminders = [];
+
+    /// <summary>The usual choices, plus the event's own reminder when it's something else.</summary>
+    private IEnumerable<int> ReminderChoices =>
+        initialReminder == NoReminder || StandardReminders.Contains(initialReminder)
+            ? StandardReminders
+            : StandardReminders.Append(initialReminder).Order();
+
+    private static string ReminderLabel(int minutes) => minutes switch
+    {
+        0 => "When it starts",
+        < 0 => $"{Span(-minutes)} after it starts",
+        _ => $"{Span(minutes)} before",
+    };
+
+    private static string Span(int m) =>
+        m % 10080 == 0 ? Plural(m / 10080, "week") : m % 1440 == 0 ? Plural(m / 1440, "day")
+        : m % 60 == 0 ? Plural(m / 60, "hour") : Plural(m, "minute");
+
+    private static string Plural(int n, string unit) => n == 1 ? $"1 {unit}" : $"{n} {unit}s";
+
     protected override async Task OnInitializedAsync()
     {
         calendarId = Event?.CalendarId ?? DefaultCalendarId ?? Calendars.FirstOrDefault()?.Id ?? "";
@@ -207,6 +244,8 @@
         {
             guests = ev.Attendees.ToList();
             initialGuests = ev.Attendees;
+            initialReminders = ev.Reminders;
+            reminder = initialReminder = ev.Reminders.Count > 0 ? ev.Reminders[0] : NoReminder;
             if (ev.Organizer is { } org)
             {
                 // A meeting someone else organises: its guest list is theirs.
@@ -282,7 +321,7 @@
     }
 
     private string Snapshot() => string.Join("|", summary, location, description, calendarId, allDay, startDate, startTime, endDate, endTime, repeat,
-        string.Join(",", guests.Select(g => g.Email + g.Optional)), guestInput.Trim(), organizerEmail);
+        string.Join(",", guests.Select(g => g.Email + g.Optional)), guestInput.Trim(), organizerEmail, reminder);
 
     private DateTime StartValue => startDate.ToDateTime(allDay ? TimeOnly.MinValue : startTime);
     private DateTime EndValue => endDate.ToDateTime(allDay ? TimeOnly.MinValue : endTime);
@@ -373,8 +412,10 @@
             error = "Choose a calendar.";
             return;
         }
+        // Reminders are only rewritten when changed here, so ones this editor can't show are kept.
+        IReadOnlyList<int>? reminders = reminder == initialReminder ? null : reminder == NoReminder ? [] : [reminder];
         var edit = new EventEdit(summary, location, description, allDay, start, end, repeat,
-            canEditGuests ? guests : null, organizer);
+            canEditGuests ? guests : null, organizer, reminders);
         busy = true;
         try { if (OnSave != null) error = await OnSave(edit, calendarId, canEditGuests && notifyGuests); }
         finally { busy = false; }

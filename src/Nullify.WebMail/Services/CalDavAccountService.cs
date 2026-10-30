@@ -436,9 +436,14 @@ public sealed partial class CalDavAccountService(
                     OccurrenceId = e.OccurrenceId,
                     Organizer = e.Organizer,
                     Attendees = e.Attendees,
+                    Reminders = ReminderMinutes(e.Alarms),
                 });
         }).ToList();
     }
+
+    /// <summary>Alarm offsets as whole minutes before the start, for the UI.</summary>
+    internal static IReadOnlyList<int> ReminderMinutes(IEnumerable<TimeSpan> alarms) =>
+        alarms.Select(a => (int)Math.Round(a.TotalMinutes)).Distinct().ToList();
 
     private Task<(Uri Url, XDocument Doc)> PropfindAsync(CalDavAccount account, Uri url, int depth, string props) =>
         SendAsync(account, "PROPFIND", url, depth,
@@ -560,8 +565,13 @@ public sealed partial class CalDavAccountService(
         using var resp = await http.SendAsync(req);
         var etag = resp.Headers.ETag?.ToString();
         var text = method == HttpMethod.Get ? await resp.Content.ReadAsStringAsync() : null;
+        if (method != HttpMethod.Get && resp.IsSuccessStatusCode && url.AbsolutePath.EndsWith(".ics", StringComparison.OrdinalIgnoreCase))
+            CalendarWritten?.Invoke();
         return new ResourceResponse(resp.StatusCode, etag, text);
     }
+
+    /// <summary>Raised after an .ics resource is written or deleted here, so reminders can be looked up again.</summary>
+    public event Action? CalendarWritten;
 
     private static void EnsureWriteSucceeded(HttpStatusCode status, string noun)
     {

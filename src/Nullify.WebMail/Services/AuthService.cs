@@ -134,10 +134,12 @@ public sealed class AuthService(
     public const string TrustedDeviceClaim = "nullify_device";
     /// <summary>Present on sessions signed in with a passkey: the <see cref="Passkey"/> row id.</summary>
     public const string PasskeyClaim = "nullify_passkey";
+    /// <summary>Present on sessions signed in with a one-time key (<see cref="LoginKeyService"/>): the computer may not be the user's.</summary>
+    public const string LoginKeyClaim = "nullify_loginkey";
 
-    public async Task SignInAsync(HttpContext ctx, CredentialInfo cred, string? trustedDeviceId = null, string? passkeyId = null)
+    public async Task SignInAsync(HttpContext ctx, CredentialInfo cred, string? trustedDeviceId = null, string? passkeyId = null, bool loginKey = false)
     {
-        var (principal, properties) = BuildSignIn(cred, qrLifetime: null, trustedDeviceId, passkeyId);
+        var (principal, properties) = BuildSignIn(cred, qrLifetime: null, trustedDeviceId, passkeyId, loginKey);
         await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, principal, properties);
         ctx.User = principal; // so the rest of this request (e.g. a page prerender) sees the user
     }
@@ -145,9 +147,11 @@ public sealed class AuthService(
     /// <summary>
     /// The principal and cookie properties for a sign-in. A QR sign-in gets a browser-session
     /// cookie with a fixed lifetime that is never extended, instead of the usual sliding 7 days.
+    /// A one-time key sign-in keeps the sliding lifetime but in a browser-session cookie, so
+    /// closing the browser ends it.
     /// </summary>
     public (System.Security.Claims.ClaimsPrincipal, AuthenticationProperties) BuildSignIn(
-        CredentialInfo cred, TimeSpan? qrLifetime, string? trustedDeviceId = null, string? passkeyId = null)
+        CredentialInfo cred, TimeSpan? qrLifetime, string? trustedDeviceId = null, string? passkeyId = null, bool loginKey = false)
     {
         var identity = new System.Security.Claims.ClaimsIdentity(CookieAuthenticationDefaults.AuthenticationScheme);
         identity.AddClaim(new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Name, cred.Login));
@@ -158,6 +162,8 @@ public sealed class AuthService(
             identity.AddClaim(new System.Security.Claims.Claim(TrustedDeviceClaim, trustedDeviceId));
         if (passkeyId != null)
             identity.AddClaim(new System.Security.Claims.Claim(PasskeyClaim, passkeyId));
+        if (loginKey)
+            identity.AddClaim(new System.Security.Claims.Claim(LoginKeyClaim, "1"));
 
         if (qrLifetime is { } lifetime)
         {
@@ -173,7 +179,7 @@ public sealed class AuthService(
 
         return (new System.Security.Claims.ClaimsPrincipal(identity), new AuthenticationProperties
         {
-            IsPersistent = true,
+            IsPersistent = !loginKey,
             ExpiresUtc = DateTimeOffset.UtcNow.AddDays(7),
             AllowRefresh = true,
         });

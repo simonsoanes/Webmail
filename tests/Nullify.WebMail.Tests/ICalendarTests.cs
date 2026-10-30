@@ -42,6 +42,56 @@ public class ICalendarTests
     }
 
     [TestMethod]
+    public void Alarms_RelativeToStartOrEnd_OrAtAFixedTime_EmailOnesLeftOut()
+    {
+        var ev = ICalendar.ParseEvents(Cal("""
+            BEGIN:VEVENT
+            UID:al
+            DTSTART:20261102T100000Z
+            DTEND:20261102T110000Z
+            SUMMARY:Review
+            BEGIN:VALARM
+            ACTION:DISPLAY
+            TRIGGER:-PT15M
+            END:VALARM
+            BEGIN:VALARM
+            ACTION:AUDIO
+            TRIGGER;RELATED=END:-PT90M
+            END:VALARM
+            BEGIN:VALARM
+            ACTION:DISPLAY
+            TRIGGER;VALUE=DATE-TIME:20261101T100000Z
+            END:VALARM
+            BEGIN:VALARM
+            ACTION:EMAIL
+            TRIGGER:-P2D
+            END:VALARM
+            END:VEVENT
+            """), TimeZoneInfo.Utc).Single();
+
+        CollectionAssert.AreEqual(new[] { TimeSpan.FromDays(1), TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(15) }, ev.Alarms);
+    }
+
+    [TestMethod]
+    public void Alarms_CarryOverToExpandedOccurrences()
+    {
+        var events = ICalendar.ParseEvents(Cal("""
+            BEGIN:VEVENT
+            UID:weekly
+            DTSTART:20261102T100000Z
+            DTEND:20261102T110000Z
+            RRULE:FREQ=WEEKLY;COUNT=3
+            BEGIN:VALARM
+            TRIGGER:-PT10M
+            END:VALARM
+            END:VEVENT
+            """), TimeZoneInfo.Utc);
+        var instances = ICalendar.Expand(events, Utc(2026, 11, 1), Utc(2026, 12, 1));
+        Assert.HasCount(3, instances);
+        Assert.IsTrue(instances.All(i => i.Alarms.SequenceEqual([TimeSpan.FromMinutes(10)])));
+    }
+
+    [TestMethod]
     public void AllDay_And_Duration_Defaults()
     {
         var events = ICalendar.ParseEvents(Cal("""

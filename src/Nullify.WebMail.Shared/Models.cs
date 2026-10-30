@@ -132,6 +132,8 @@ public sealed record CalendarEvent(
     /// <summary>Who sent the invitation; null for an event that isn't a meeting.</summary>
     public EventAttendee? Organizer { get; init; }
     public IReadOnlyList<EventAttendee> Attendees { get; init; } = [];
+    /// <summary>When its reminders (display or sound VALARMs) go off: minutes before the start, earliest first.</summary>
+    public IReadOnlyList<int> Reminders { get; init; } = [];
 }
 
 /// <summary>An attendee's answer (RFC 5545 PARTSTAT).</summary>
@@ -149,10 +151,12 @@ public enum EventRepeat { None, Daily, Weekly, Monthly, Yearly }
 /// <summary>The editable fields of an event. For all-day events End is the last day (inclusive).</summary>
 /// <param name="Attendees">The guest list to write, or null to keep the server's as it is.</param>
 /// <param name="Organizer">Who invites the guests (one of the user's addresses); used when there are attendees.</param>
+/// <param name="Reminders">Reminders to write, in minutes before the start (empty for none), or null to keep the event's as they are.</param>
 public sealed record EventEdit(
     string Summary, string? Location, string? Description, bool AllDay,
     DateTime StartLocal, DateTime EndLocal, EventRepeat Repeat,
-    IReadOnlyList<EventAttendee>? Attendees = null, SenderIdentity? Organizer = null);
+    IReadOnlyList<EventAttendee>? Attendees = null, SenderIdentity? Organizer = null,
+    IReadOnlyList<int>? Reminders = null);
 
 /// <summary>Where a calendar comes from.</summary>
 public enum CalendarKind

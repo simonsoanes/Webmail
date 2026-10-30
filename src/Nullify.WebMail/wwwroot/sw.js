@@ -23,3 +23,19 @@ self.addEventListener('fetch', event => {
     event.respondWith(fetch(event.request).catch(async () =>
         (await caches.match(OFFLINE)) ?? Response.error()));
 });
+
+// A notification clicked: bring the app forward and tell it what to open.
+self.addEventListener('notificationclick', event => {
+    event.notification.close();
+    const data = event.notification.data || {};
+    event.waitUntil((async () => {
+        const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+        const app = windows.find(c => c.url.startsWith(self.registration.scope));
+        if (app) {
+            await app.focus();
+            app.postMessage({ type: 'notification-click', kind: data.kind, id: data.id });
+        } else {
+            await self.clients.openWindow(self.registration.scope);
+        }
+    })());
+});

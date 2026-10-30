@@ -37,6 +37,9 @@ public sealed class UserSession(
     /// <summary>When this browser is a trusted computer: its <see cref="Data.TrustedDevice"/> id.</summary>
     public string? TrustedDeviceId { get; private set; }
 
+    /// <summary>Signed in with a one-time key: like a QR sign-in, probably not the user's own computer.</summary>
+    public bool IsLoginKeySession { get; private set; }
+
     public async Task CaptureAsync(CancellationToken ct = default)
     {
         if (Credential != null) return;
@@ -49,6 +52,7 @@ public sealed class UserSession(
 
         SessionId = user?.FindFirst(AuthService.SessionIdClaim)?.Value;
         TrustedDeviceId = user?.FindFirst(AuthService.TrustedDeviceClaim)?.Value;
+        IsLoginKeySession = user?.FindFirst(AuthService.LoginKeyClaim) != null;
         if (long.TryParse(user?.FindFirst(AuthService.QrSessionClaim)?.Value, out var expires))
             QrSessionExpiresUtc = DateTimeOffset.FromUnixTimeSeconds(expires);
         await ApplyAsync(cred, ct);

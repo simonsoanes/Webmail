@@ -15,21 +15,28 @@ namespace Nullify.WebMail.Controllers;
 public class AuthController(
     AuthService auth,
     TrustedDeviceService trustedDevices,
+    LoginKeyService loginKeys,
     IDbContextFactory<AppDbContext> dbFactory) : ControllerBase
 {
-    /// <summary>JSON login used by the browser via fetch — the Set-Cookie lands in the browser jar.</summary>
+    /// <summary>
+    /// JSON login used by the browser via fetch — the Set-Cookie lands in the browser jar.
+    /// The password field also takes a one-time sign-in key, which unlocks the real password.
+    /// </summary>
     [HttpPost("login")]
     [AllowAnonymous]
     public async Task<LoginResponse> Login([FromBody] LoginRequest request)
     {
         var ct = HttpContext.RequestAborted;
-        var (result, cred) = await auth.VerifyLoginAsync(request.Username ?? "", request.Password ?? "", ct);
+        var password = request.Password ?? "";
+        var unlocked = loginKeys.Redeem(request.Username ?? "", password);
+        var (result, cred) = await auth.VerifyLoginAsync(request.Username ?? "", unlocked ?? password, ct);
         if (cred != null)
         {
-            var deviceId = request.TrustDevice
+            // A key is for a computer that isn't the user's, so it never makes the computer trusted.
+            var deviceId = request.TrustDevice && unlocked == null
                 ? await trustedDevices.TrustAsync(HttpContext, cred.Login, cred.Password, ct)
                 : null;
-            await auth.SignInAsync(HttpContext, cred, deviceId);
+            await auth.SignInAsync(HttpContext, cred, deviceId, loginKey: unlocked != null);
         }
         return new LoginResponse(result.Success, result.Error);
     }

@@ -130,6 +130,44 @@ window.nullifyApp = (() => {
     const isTyping = (el) =>
         el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
 
+    // ---- notifications (installed app only; the choices are kept in this browser) ----
+    const NOTIFY_PREFS = 'nullify.notify', NOTIFIED = 'nullify.notified';
+    const installed = () =>
+        ['standalone', 'window-controls-overlay', 'minimal-ui', 'fullscreen'].some(m => matchMedia(`(display-mode: ${m})`).matches)
+        || navigator.standalone === true;
+    const notifyPrefs = () => {
+        try {
+            const v = JSON.parse(localStorage.getItem(NOTIFY_PREFS) || '{}');
+            return { mail: v.mail === true, calendar: v.calendar === true };
+        } catch { return { mail: false, calendar: false }; }
+    };
+    const notifyState = () => ({
+        supported: 'Notification' in window && 'serviceWorker' in navigator,
+        installed: installed(),
+        permission: 'Notification' in window ? Notification.permission : 'denied',
+        ...notifyPrefs()
+    });
+    /** Tags already shown (by this or another window), so a reminder pops up once. */
+    const markNotified = (tag) => {
+        let seen = {};
+        try { seen = JSON.parse(localStorage.getItem(NOTIFIED) || '{}') || {}; } catch { }
+        if (seen[tag]) return false;
+        const now = Date.now();
+        for (const [k, t] of Object.entries(seen)) if (now - t > 3 * 86400000) delete seen[k];
+        seen[tag] = now;
+        try { localStorage.setItem(NOTIFIED, JSON.stringify(seen)); } catch { }
+        return true;
+    };
+    let swListener = null;
+    function listenForNotificationClicks() {
+        if (swListener || !('serviceWorker' in navigator)) return;
+        swListener = (e) => {
+            const d = e.data;
+            if (d && d.type === 'notification-click' && dotnet) dotnet.invokeMethodAsync('OnNotificationClick', d.kind || '', d.id || '');
+        };
+        navigator.serviceWorker.addEventListener('message', swListener);
+    }
+
     function connectEvents() {
         if (!window.EventSource || events) return;
         events = new EventSource('api/events', { withCredentials: true });
@@ -172,13 +210,65 @@ window.nullifyApp = (() => {
             document.addEventListener('keydown', keyHandler);
             wireSplitters();
             connectEvents();
+            listenForNotificationClicks();
             try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { return ''; }
         },
 
         dispose() {
             if (keyHandler) document.removeEventListener('keydown', keyHandler);
             if (events) events.close();
-            keyHandler = null; events = null; dotnet = null;
+            if (swListener) navigator.serviceWorker.removeEventListener('message', swListener);
+            keyHandler = null; events = null; dotnet = null; swListener = null;
+        },
+
+        async copyText(text) {
+            try { await navigator.clipboard.writeText(text); return true; } catch { return false; }
+        },
+
+        notifications: {
+            state: notifyState,
+
+            /** Turn one kind ('mail' or 'calendar') on or off; turning on asks for permission first. */
+            async set(kind, on) {
+                if (on && 'Notification' in window && Notification.permission === 'default') {
+                    try { await Notification.requestPermission(); } catch { }
+                }
+                const prefs = notifyPrefs();
+                prefs[kind] = on && 'Notification' in window && Notification.permission === 'granted';
+                try { localStorage.setItem(NOTIFY_PREFS, JSON.stringify(prefs)); } catch { }
+                return notifyState();
+            },
+
+            /**
+             * Show a notification of one kind, if it's turned on and this is the installed app.
+             * With onlyWhenAway it's skipped while the user is looking at the app. Each tag is shown once.
+             */
+            async show(kind, tag, title, body, id, onlyWhenAway) {
+                const st = notifyState();
+                if (!st.supported || !st.installed || st.permission !== 'granted' || !st[kind]) return false;
+                if (onlyWhenAway && document.visibilityState === 'visible' && document.hasFocus()) return false;
+                if (!markNotified(tag)) return false;
+                const options = { body, tag, icon: 'icons/icon-192.png', data: { kind, id } };
+                try {
+                    const reg = await navigator.serviceWorker.ready;
+                    await reg.showNotification(title, options);
+                } catch {
+                    try {
+                        const n = new Notification(title, options);
+                        n.onclick = () => { window.focus(); if (dotnet) dotnet.invokeMethodAsync('OnNotificationClick', kind, id || ''); n.close(); };
+                    } catch { return false; }
+                }
+                return true;
+            },
+
+            /** Send a sample, so the user sees what they've turned on. */
+            async test() {
+                if (!('Notification' in window) || Notification.permission !== 'granted') return false;
+                const options = { body: 'Notifications are working.', tag: 'nullify-test', icon: 'icons/icon-192.png' };
+                try { await (await navigator.serviceWorker.ready).showNotification(document.title, options); }
+                catch { try { new Notification(document.title, options); } catch { return false; } }
+                return true;
+            }
         },
 
         getTheme() {

@@ -123,6 +123,8 @@ builder.Services.AddOptions<CookieAuthenticationOptions>(CookieAuthenticationDef
 
 // Signing in a desktop from a phone by QR code; pending requests are in memory too.
 builder.Services.AddSingleton<QrLoginService>();
+// One-time sign-in keys, also in memory only (they last half an hour at most).
+builder.Services.AddSingleton<LoginKeyService>();
 builder.Services.AddRateLimiter(o =>
 {
     o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;

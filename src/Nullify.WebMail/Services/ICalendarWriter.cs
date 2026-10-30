@@ -31,6 +31,7 @@ public static partial class ICalendarWriter
         lines.Add("CREATED:" + UtcStamp());
         lines.AddRange(EventProperties(edit, times, rrule, sequence: 0));
         if (edit.Attendees != null) lines.AddRange(People(edit, [], reset: false));
+        if (edit.Reminders != null) lines.AddRange(Alarms(edit));
         lines.Add("END:VEVENT");
         lines.Add("END:VCALENDAR");
         return Serialize(lines);
@@ -57,6 +58,8 @@ public static partial class ICalendarWriter
         {
             var ev = events.FirstOrDefault(e => i >= e.Begin && i <= e.End);
             if (ev != null && ev.IsOverride && dropExceptions) { i = ev.End; continue; }
+            // New reminders replace the series' alarms (the only components a VEVENT holds).
+            if (ev == master && edit.Reminders != null && i > ev.Begin && i < ev.End && ev.Depth(i) > 0) continue;
             if (ev != null && i > ev.Begin && i < ev.End && ev.Depth(i) == 0)
             {
                 var name = PropertyName(lines[i]);
@@ -84,7 +87,11 @@ public static partial class ICalendarWriter
             if (at < 0) continue;
             output.RemoveAt(at);
             List<string> insert = edit.Attendees == null ? [] : People(edit, people.GetValueOrDefault(ev) ?? [], rescheduled).ToList();
-            if (ev == master) insert.InsertRange(0, props);
+            if (ev == master)
+            {
+                insert.InsertRange(0, props);
+                if (edit.Reminders != null) insert.AddRange(Alarms(edit));
+            }
             output.InsertRange(at, insert);
         }
 
@@ -209,6 +216,32 @@ public static partial class ICalendarWriter
         if (!string.IsNullOrWhiteSpace(edit.Location)) yield return "LOCATION:" + Escape(edit.Location.Trim());
         if (!string.IsNullOrWhiteSpace(edit.Description)) yield return "DESCRIPTION:" + Escape(edit.Description.Trim());
         if (rrule != null) yield return "RRULE:" + rrule;
+    }
+
+    /// <summary>A display VALARM per reminder, each going off that many minutes before the start.</summary>
+    private static IEnumerable<string> Alarms(EventEdit edit)
+    {
+        var text = Escape(string.IsNullOrWhiteSpace(edit.Summary) ? "Reminder" : edit.Summary.Trim());
+        foreach (var minutes in edit.Reminders!.Distinct().OrderDescending())
+        {
+            yield return "BEGIN:VALARM";
+            yield return "ACTION:DISPLAY";
+            yield return "DESCRIPTION:" + text;
+            yield return "TRIGGER:" + Before(minutes);
+            yield return "END:VALARM";
+        }
+    }
+
+    /// <summary>A TRIGGER duration for <paramref name="minutes"/> before the start, in the largest whole unit.</summary>
+    public static string Before(int minutes)
+    {
+        if (minutes == 0) return "PT0M";
+        var sign = minutes > 0 ? "-" : "";
+        var m = Math.Abs(minutes);
+        return m % 10080 == 0 ? $"{sign}P{m / 10080}W"
+            : m % 1440 == 0 ? $"{sign}P{m / 1440}D"
+            : m % 60 == 0 ? $"{sign}PT{m / 60}H"
+            : $"{sign}PT{m}M";
     }
 
     public static string? RuleFor(EventRepeat repeat) => repeat switch

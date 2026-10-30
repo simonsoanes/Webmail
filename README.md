@@ -5,7 +5,7 @@ A self-hosted **webmail client** for your existing IMAP/SMTP server, with calend
 - **Mail** over IMAP and SMTP: folders, search, flags, move and archive, attachments, HTML and plain-text compose, reply and forward
 - **Safe message display**: HTML mail is rendered in a sandboxed iframe, with remote images blocked until you allow them
 - **OpenPGP** in the browser: key generation, import and export, encrypt, decrypt, sign and verify, with optional unlock by a security key (WebAuthn PRF). The OpenPGP cryptography runs in the browser, and private keys are only stored in protected form.
-- **Calendar and contacts** from any CalDAV/CardDAV server, with recipient autocomplete from your address books. Month, week and day views; drag across days or times to create an event there. Calendars shared with you and those of people who made you their delegate can be turned on and off, and you can subscribe to published internet calendars (webcal/.ics) and public CalDAV calendars
+- **Calendar and contacts** from any CalDAV/CardDAV server, with recipient autocomplete from your address books. Month, week and day views; drag across days or times to create an event there, and set a reminder on it. Calendars shared with you and those of people who made you their delegate can be turned on and off, and you can subscribe to published internet calendars (webcal/.ics) and public CalDAV calendars
 - **Tasks and notes** kept on the same CalDAV server (as VTODOs and VJOURNALs), so they sync with other CalDAV apps. If none of your calendars accept them, the app can create a task list or notes list for you
 - **Files** from a WebDAV server
 - **Filters** via ManageSieve, with a Sieve script editor
@@ -14,6 +14,8 @@ A self-hosted **webmail client** for your existing IMAP/SMTP server, with calend
 - **Sign in from your phone**: on a computer you don't fully trust, scan a QR code and type the password on your phone instead. The computer gets a short-lived session that the phone can end ([design](docs/qr-passkey-signin.md)).
 - **Passkeys**: sign in with a fingerprint, face, PIN or security key instead of the password. The passkey also unlocks the mail password, which is stored encrypted with a key derived from the passkey (WebAuthn PRF), so the server can't read it between sign-ins. A passkey on your phone can also approve signing in a computer by QR code ([design](docs/qr-passkey-signin.md)).
 - **I trust this computer**: on your own computer, tick it at sign-in to stay signed in for 30 days, even after the server restarts. The browser keeps the password in a cookie only the server can decrypt; sign out, or remove the computer in Settings, to end it.
+- **One-time sign-in keys**: make a short key in Settings (like `K7QM-R3XD-9FHW-2NBT`) and type it instead of your password on a computer you'd rather not type the password on. It works once, expires within 30 minutes at most, and can be revoked. The password is kept encrypted with the key, in server memory only, until the key is used.
+- **Notifications** in the installed app (PWA): new mail in your Inbox and calendar reminders, each turned on in Settings for that browser. They're shown while the app is open, even minimised; nothing is pushed through a third-party push service.
 - **OpenPGP passphrases never reach the server**, and secret keys are only ever decrypted in the browser.
 - Light and dark themes, keyboard shortcuts, mobile-friendly layout
 - Only Microsoft packages are used on the server, and no third-party JavaScript libraries in the browser

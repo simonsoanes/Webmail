@@ -30,6 +30,8 @@ public sealed class ICalEvent
     public EventAttendee? Organizer { get; init; }
     public List<EventAttendee> Attendees { get; init; } = new();
     public int Sequence { get; init; }
+    /// <summary>Display and sound VALARMs: how long before the start each goes off (negative = after it), earliest first.</summary>
+    public List<TimeSpan> Alarms { get; init; } = new();
 
     public bool IsRecurring => RRule != null || RecurrenceIdWall != null || FromSeries;
 
@@ -55,6 +57,8 @@ public static partial class ICalendar
         Dictionary<string, (string Value, Dictionary<string, string> Params)>? props = null;
         List<(string Value, Dictionary<string, string> Params)>? exdates = null;
         List<EventAttendee>? attendees = null;
+        List<RawAlarm>? alarms = null;
+        RawAlarm? alarm = null; // the VALARM being read
         var depth = 0; // nesting inside VEVENT (VALARM etc.)
 
         foreach (var line in Unfold(ics))
@@ -64,20 +68,39 @@ public static partial class ICalendar
                 props = new(StringComparer.OrdinalIgnoreCase);
                 exdates = new();
                 attendees = new();
+                alarms = new();
+                alarm = null;
                 depth = 0;
                 continue;
             }
             if (props == null) continue;
-            if (line.StartsWith("BEGIN:", StringComparison.OrdinalIgnoreCase)) { depth++; continue; }
+            if (line.StartsWith("BEGIN:", StringComparison.OrdinalIgnoreCase))
+            {
+                depth++;
+                if (depth == 1 && line.Equals("BEGIN:VALARM", StringComparison.OrdinalIgnoreCase)) alarm = new RawAlarm();
+                continue;
+            }
             if (line.StartsWith("END:", StringComparison.OrdinalIgnoreCase))
             {
-                if (depth > 0) { depth--; continue; }
+                if (depth > 0)
+                {
+                    if (depth == 1 && alarm != null) { alarms!.Add(alarm); alarm = null; }
+                    depth--;
+                    continue;
+                }
                 if (line.Equals("END:VEVENT", StringComparison.OrdinalIgnoreCase))
                 {
-                    var ev = Build(props, exdates!, attendees!, floatingZone);
+                    var ev = Build(props, exdates!, attendees!, alarms!, floatingZone);
                     if (ev != null) events.Add(ev);
                     props = null;
                 }
+                continue;
+            }
+            if (depth == 1 && alarm != null)
+            {
+                var (alarmProp, alarmParams, alarmValue) = SplitProperty(line);
+                if (alarmProp.Equals("TRIGGER", StringComparison.OrdinalIgnoreCase)) alarm.Trigger ??= (alarmValue, alarmParams);
+                else if (alarmProp.Equals("ACTION", StringComparison.OrdinalIgnoreCase)) alarm.Action = alarmValue.Trim().ToUpperInvariant();
                 continue;
             }
             if (depth > 0) continue;
@@ -90,9 +113,16 @@ public static partial class ICalendar
         return events;
     }
 
+    private sealed class RawAlarm
+    {
+        public (string Value, Dictionary<string, string> Params)? Trigger;
+        public string? Action;
+    }
+
     private static ICalEvent? Build(
         Dictionary<string, (string Value, Dictionary<string, string> Params)> p,
-        List<(string Value, Dictionary<string, string> Params)> exdates, List<EventAttendee> attendees, TimeZoneInfo floating)
+        List<(string Value, Dictionary<string, string> Params)> exdates, List<EventAttendee> attendees,
+        List<RawAlarm> alarms, TimeZoneInfo floating)
     {
         if (!p.TryGetValue("DTSTART", out var dtStart)) return null;
         if (!TryParseTime(dtStart.Value, dtStart.Params, floating, out var start, out var zone, out var allDay)) return null;
@@ -127,11 +157,34 @@ public static partial class ICalendar
             Attendees = attendees,
             Sequence = int.TryParse(p.GetValueOrDefault("SEQUENCE").Value, out var seq) ? seq : 0,
         };
+        foreach (var a in alarms)
+            if (AlarmOffset(ev, a, floating) is { } before && !ev.Alarms.Contains(before))
+                ev.Alarms.Add(before);
+        ev.Alarms.Sort((a, b) => b.CompareTo(a));
         foreach (var (value, parameters) in exdates)
             foreach (var part in value.Split(','))
                 if (TryParseTime(part, parameters, floating, out var x, out var xZone, out _))
                     ev.ExDatesWall.Add(allDay ? x.Date : TimeZoneInfo.ConvertTime(new DateTimeOffset(x, xZone.GetUtcOffset(x)), zone).DateTime);
         return ev;
+    }
+
+    /// <summary>
+    /// How long before the event's start a VALARM goes off: its TRIGGER relative to the start
+    /// (or, with RELATED=END, the end), or a fixed time. Email alarms and ones without a usable
+    /// trigger are left out.
+    /// </summary>
+    private static TimeSpan? AlarmOffset(ICalEvent ev, RawAlarm alarm, TimeZoneInfo floating)
+    {
+        if (alarm.Action is not (null or "DISPLAY" or "AUDIO") || alarm.Trigger is not { } trigger) return null;
+        if (string.Equals(trigger.Params.GetValueOrDefault("VALUE"), "DATE-TIME", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!TryParseTime(trigger.Value, trigger.Params, floating, out var at, out var atZone, out _)) return null;
+            return ev.Start - new DateTimeOffset(at, atZone.GetUtcOffset(at));
+        }
+        if (!TryParseDuration(trigger.Value, out var offset)) return null;
+        if (string.Equals(trigger.Params.GetValueOrDefault("RELATED"), "END", StringComparison.OrdinalIgnoreCase))
+            offset += ev.End - ev.Start;
+        return -offset;
     }
 
     // ------------------------------------------------------------------ recurrence
@@ -163,7 +216,7 @@ public static partial class ICalendar
                 {
                     Uid = ev.Uid, Summary = ev.Summary, Location = ev.Location, Description = ev.Description,
                     Status = ev.Status, AllDay = ev.AllDay, Zone = ev.Zone,
-                    Organizer = ev.Organizer, Attendees = ev.Attendees, Sequence = ev.Sequence,
+                    Organizer = ev.Organizer, Attendees = ev.Attendees, Sequence = ev.Sequence, Alarms = ev.Alarms,
                     StartWall = wall, EndWall = wall + (ev.EndWall - ev.StartWall), FromSeries = true,
                 };
                 if (Overlaps(instance.Start, instance.End, from, to)) result.Add(instance);

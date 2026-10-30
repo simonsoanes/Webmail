@@ -119,6 +119,7 @@ public sealed partial class CalDavAccountService
                 OccurrenceId = e.OccurrenceId,
                 Organizer = e.Organizer,
                 Attendees = e.Attendees,
+                Reminders = ReminderMinutes(e.Alarms),
             }).ToList();
     }
 

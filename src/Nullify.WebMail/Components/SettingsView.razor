@@ -30,6 +30,46 @@
         </div>
     </section>
 
+    <section class="card" id="notification-settings">
+        <div class="card-head">
+            <div class="icon-tile"><Icon Name="bell" /></div>
+            <div><h3>Notifications</h3><p>Stored in this browser. Shown by the installed app while it's open, even when minimised.</p></div>
+        </div>
+        @if (notify == null)
+        {
+            <p class="muted"><span class="spinner"></span></p>
+        }
+        else if (!notify.Supported)
+        {
+            <p class="muted">This browser can't show notifications.</p>
+        }
+        else
+        {
+            @if (!notify.Installed)
+            {
+                <div class="notice"><Icon Name="monitor" Size="15" /><span>Install @State.BrandTitle WebMail as an app (from your browser's menu) to get notifications. Only the installed app shows them.</span></div>
+            }
+            @if (notify.Permission == "denied")
+            {
+                <div class="notice"><Icon Name="alert" Size="15" /><span>Notifications are blocked for this site. Allow them in your browser's site settings, then turn them on here.</span></div>
+            }
+            <div class="notify-options">
+                <label class="check-row trust-row">
+                    <input type="checkbox" checked="@notify.Mail" disabled="@NotifyDisabled" @onchange='e => SetNotify("mail", e)' />
+                    <span>New mail <small>A message arriving in your Inbox, unless you're looking at the app already.</small></span>
+                </label>
+                <label class="check-row trust-row">
+                    <input type="checkbox" checked="@notify.Calendar" disabled="@NotifyDisabled" @onchange='e => SetNotify("calendar", e)' />
+                    <span>Calendar reminders <small>For events with a reminder set. Choose one when you add or edit an event.</small></span>
+                </label>
+            </div>
+            @if (notify.Permission == "granted" && notify.Installed && (notify.Mail || notify.Calendar))
+            {
+                <button class="btn small" @onclick="TestNotification"><Icon Name="bell" Size="14" /> Send a test notification</button>
+            }
+        }
+    </section>
+
     <section class="card" id="identity-settings">
         <div class="card-head">
             <div class="icon-tile"><Icon Name="user" /></div>
@@ -413,6 +453,7 @@
         </div>
         <PasskeyList />
         <TrustedDeviceList />
+        <LoginKeyList />
         <button class="btn danger" @onclick="Logout"><Icon Name="logout" Size="15" /> Sign out</button>
     </section>
 
@@ -635,9 +676,37 @@
         try
         {
             theme = await JS.InvokeAsync<string>("nullifyApp.getTheme");
+            notify = await JS.InvokeAsync<Notifications.NotifyState>("nullifyApp.notifications.state");
             StateHasChanged();
         }
         catch { /* keep default */ }
+    }
+
+    // ---- notifications ----
+
+    private Notifications.NotifyState? notify;
+
+    private bool NotifyDisabled => notify is not { Installed: true } || notify.Permission == "denied";
+
+    private async Task SetNotify(string kind, ChangeEventArgs e)
+    {
+        var on = e.Value is true;
+        try
+        {
+            notify = await JS.InvokeAsync<Notifications.NotifyState>("nullifyApp.notifications.set", kind, on);
+            if (on && notify.Permission != "granted")
+                State.ShowToast("Notifications weren't allowed, so they stay off.", isError: true);
+        }
+        catch (JSException ex)
+        {
+            State.ShowToast($"Could not change it: {ex.Message}", isError: true);
+        }
+    }
+
+    private async Task TestNotification()
+    {
+        if (!await JS.InvokeAsync<bool>("nullifyApp.notifications.test"))
+            State.ShowToast("The notification couldn't be shown.", isError: true);
     }
 
     private async Task SetTheme(string value)

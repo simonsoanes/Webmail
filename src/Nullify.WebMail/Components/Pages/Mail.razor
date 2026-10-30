@@ -91,6 +91,8 @@
         </div>
     }
 
+    <Notifications @ref="notifications" />
+
     @if (launchedFiles != null)
     {
         <IcsImport @key="launchedFiles" Files="launchedFiles" OnClose="CloseImport" />
@@ -116,6 +118,7 @@
     private CancellationTokenSource? updateDebounce;
     private List<(string Name, string Text)>? launchedFiles;
     private int calendarKey;
+    private Notifications? notifications;
 
     private string PageTitleText
     {
@@ -295,9 +298,29 @@
                 if (State.SelectedFolder == "INBOX" && State.CurrentPage == 0 && !State.IsSearching)
                     State.ListVersion++;
                 State.NotifyStateChanged();
+                if (notifications != null) _ = notifications.MailboxChanged();
             });
         }, TaskScheduler.Default);
     }
+
+    /// <summary>A notification was clicked: show the message, or the calendar.</summary>
+    [JSInvokable]
+    public Task OnNotificationClick(string kind, string id) => InvokeAsync(() =>
+    {
+        if (kind == "calendar")
+        {
+            SetTab("calendar");
+            return;
+        }
+        if (kind != "mail") return;
+        State.ActiveTab = "mail";
+        State.ShowCompose = false;
+        State.SelectedFolder = "INBOX";
+        State.SelectedMessageUid = long.TryParse(id, out var uid) ? uid : null;
+        State.CheckedUids.Clear();
+        State.ListVersion++;
+        State.NotifyStateChanged();
+    });
 
     public async ValueTask DisposeAsync()
     {

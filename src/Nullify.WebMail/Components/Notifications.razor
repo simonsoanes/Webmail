@@ -1,0 +1,188 @@
+@* Copyright 2026 Simon Soanes
+   SPDX-License-Identifier: Apache-2.0 *@
+@implements IDisposable
+@inject ApiService Api
+@inject CalDavAccountService CalDav
+@inject AppState State
+@inject IJSRuntime JS
+@inject ILogger<Notifications> Logger
+
+@*
+    New-mail and calendar-reminder notifications for the installed app. Nothing is pushed from the
+    server: while the app is open (it may be minimised) this checks the Inbox when IMAP IDLE says it
+    changed, and the coming week's reminders once a minute. Whether each kind is on is chosen in
+    Settings and kept in the browser (nullifyApp.notifications), which also shows each one only once.
+*@
+
+@code {
+    /// <summary>What nullifyApp.notifications.state() reports.</summary>
+    public sealed record NotifyState(bool Supported, bool Installed, string Permission, bool Mail, bool Calendar)
+    {
+        public bool Allowed => Supported && Installed && Permission == "granted";
+    }
+
+    private const string Inbox = "INBOX";
+    private const int MaxSingleMailNotices = 3;
+    private static readonly TimeSpan Tick = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan MailFallback = TimeSpan.FromMinutes(5); // in case IDLE isn't delivering
+    private static readonly TimeSpan CalendarRefresh = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan Lookahead = TimeSpan.FromDays(8); // reminders go up to a week ahead
+    /// <summary>A reminder that went off while the app was closed or asleep is still shown this long after.</summary>
+    private static readonly TimeSpan Grace = TimeSpan.FromMinutes(10);
+
+    private Timer? timer;
+    private readonly SemaphoreSlim gate = new(1, 1);
+    private long? lastUid; // newest Inbox message already accounted for
+    private DateTime lastMailCheck = DateTime.MinValue;
+    private IReadOnlyList<CalendarEvent> upcoming = [];
+    private DateTime calendarLoaded = DateTime.MinValue;
+    private bool calendarStale = true;
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (!firstRender) return;
+        CalDav.CalendarWritten += OnCalendarWritten;
+        timer = new Timer(_ => _ = InvokeAsync(RunTick), null, TimeSpan.FromSeconds(5), Tick);
+    }
+
+    /// <summary>The Inbox changed (IMAP IDLE): tell the user about new messages.</summary>
+    public Task MailboxChanged() => InvokeAsync(() => Guarded(CheckMailAsync));
+
+    private void OnCalendarWritten() => calendarStale = true;
+
+    private Task RunTick() => Guarded(async state =>
+    {
+        if (DateTime.UtcNow - lastMailCheck >= MailFallback) await CheckMailAsync(state);
+        await CheckCalendarAsync(state);
+    });
+
+    private async Task Guarded(Func<NotifyState, Task> work)
+    {
+        if (!await gate.WaitAsync(0)) return; // a check is already running
+        try
+        {
+            var state = await JS.InvokeAsync<NotifyState>("nullifyApp.notifications.state");
+            await work(state);
+        }
+        catch (JSDisconnectedException) { }
+        catch (TaskCanceledException) { }
+        catch (Exception ex)
+        {
+            Logger.LogDebug("Notification check failed: {Msg}", ex.Message);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    // ---- mail ----
+
+    private async Task CheckMailAsync(NotifyState state)
+    {
+        lastMailCheck = DateTime.UtcNow;
+        if (!state.Allowed || !state.Mail)
+        {
+            lastUid = null; // start afresh when turned on, rather than announcing everything since
+            return;
+        }
+        var page = await Api.GetMessagesAsync(Inbox, 0, 20);
+        if (page == null || page.Messages.Count == 0) return;
+        var newest = page.Messages.Max(m => m.Uid);
+        if (lastUid is not { } seen)
+        {
+            lastUid = newest;
+            return;
+        }
+        var fresh = page.Messages.Where(m => m.Uid > seen && !m.IsSeen).OrderBy(m => m.Uid).ToList();
+        lastUid = Math.Max(seen, newest);
+        if (fresh.Count == 0) return;
+
+        if (fresh.Count <= MaxSingleMailNotices)
+        {
+            foreach (var m in fresh)
+                await Show("mail", $"mail:{m.Uid}", Sender(m), string.IsNullOrWhiteSpace(m.Subject) ? "(no subject)" : m.Subject,
+                    m.Uid.ToString(System.Globalization.CultureInfo.InvariantCulture), onlyWhenAway: true);
+            return;
+        }
+        var from = string.Join(", ", fresh.Select(Sender).Distinct().Take(3));
+        await Show("mail", $"mail:{fresh[^1].Uid}", $"{fresh.Count} new messages", "From " + from, "", onlyWhenAway: true);
+    }
+
+    private static string Sender(MessageSummary m)
+    {
+        var a = MailFormat.ParseAddress(m.From);
+        return !string.IsNullOrWhiteSpace(a.Name) ? a.Name : !string.IsNullOrWhiteSpace(a.Email) ? a.Email : "New message";
+    }
+
+    // ---- calendar ----
+
+    private async Task CheckCalendarAsync(NotifyState state)
+    {
+        if (!state.Allowed || !state.Calendar) return;
+        var now = DateTimeOffset.UtcNow;
+        if (calendarStale || DateTime.UtcNow - calendarLoaded >= CalendarRefresh) await LoadCalendarAsync(now);
+
+        foreach (var ev in upcoming)
+        {
+            var start = StartOf(ev);
+            foreach (var minutes in ev.Reminders)
+            {
+                var due = start.AddMinutes(-minutes);
+                if (due > now || now - due > Grace) continue;
+                var tag = $"cal:{ev.Uid}:{start.ToUnixTimeSeconds()}:{minutes}";
+                await Show("calendar", tag, ev.Summary, When(ev, start, now), "", onlyWhenAway: false);
+            }
+        }
+    }
+
+    private async Task LoadCalendarAsync(DateTimeOffset now)
+    {
+        calendarStale = false;
+        calendarLoaded = DateTime.UtcNow;
+        // The calendars the user shows: the same choice as the calendar view's.
+        var prefs = await Api.GetPreferencesAsync();
+        HashSet<string> Lines(string key) =>
+            (prefs.FirstOrDefault(p => p.Key == key)?.Value ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+        var hidden = Lines("calendar.hidden");
+        var delegated = Lines("calendar.delegated");
+        try
+        {
+            var range = await CalDav.GetEventsAsync(now - TimeSpan.FromDays(1), now + Lookahead, State.TimeZone,
+                c => c.Kind == CalendarKind.Delegated ? delegated.Contains(c.Id) : !hidden.Contains(c.Id));
+            upcoming = range?.Events.Where(e => e.Reminders.Count > 0).ToList() ?? [];
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException)
+        {
+            Logger.LogDebug("Couldn't read calendars for reminders: {Msg}", ex.Message);
+        }
+    }
+
+    /// <summary>When the event starts here; an all-day event's reminders count from local midnight.</summary>
+    private DateTimeOffset StartOf(CalendarEvent ev)
+    {
+        if (!ev.AllDay) return ev.Start;
+        var day = ev.Start.UtcDateTime.Date;
+        return new DateTimeOffset(day, State.TimeZone.GetUtcOffset(day));
+    }
+
+    private string When(CalendarEvent ev, DateTimeOffset start, DateTimeOffset now)
+    {
+        var local = TimeZoneInfo.ConvertTime(start, State.TimeZone);
+        var today = TimeZoneInfo.ConvertTime(now, State.TimeZone).Date;
+        var day = local.Date == today ? "Today" : local.Date == today.AddDays(1) ? "Tomorrow" : local.ToString("ddd d MMM");
+        var text = ev.AllDay
+            ? $"{day}, all day"
+            : $"{day} {local:HH:mm}–{TimeZoneInfo.ConvertTime(ev.End, State.TimeZone):HH:mm}";
+        return string.IsNullOrWhiteSpace(ev.Location) ? text : $"{text} · {ev.Location}";
+    }
+
+    private async Task Show(string kind, string tag, string title, string body, string id, bool onlyWhenAway) =>
+        await JS.InvokeAsync<bool>("nullifyApp.notifications.show", kind, tag, title, body, id, onlyWhenAway);
+
+    public void Dispose()
+    {
+        CalDav.CalendarWritten -= OnCalendarWritten;
+        timer?.Dispose();
+    }
+}
