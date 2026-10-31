@@ -1306,8 +1306,11 @@ img.avatar { object-fit: cover; background: var(--surface-3); }
 .docs-table tr.editing td { background: var(--accent-soft); }
 .rename-row { display: flex; align-items: center; gap: .5rem; }
 .rename-row input { flex: 1; max-width: 420px; height: 32px; }
-.drop-overlay { position: absolute; inset: 0; z-index: 30; background: color-mix(in srgb, var(--accent) 10%, var(--surface) 85%); border: 2px dashed var(--accent); border-radius: var(--radius); display: grid; place-items: center; }
-.drop-overlay input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: copy; }
+.drop-overlay { position: absolute; inset: 0; z-index: 30; background: color-mix(in srgb, var(--accent) 10%, var(--surface) 85%); border: 2px dashed var(--accent); border-radius: var(--radius); display: none; place-items: center; pointer-events: none; }
+.docs-shell[data-drop] .drop-overlay { display: grid; }
+.upload-status .upload-pct { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.docs-table tr.just-added td { animation: just-added 2.5s ease-out; }
+@keyframes just-added { from, 40% { background: var(--accent-soft); } }
 .drop-hint { display: flex; flex-direction: column; align-items: center; gap: .5rem; color: var(--accent); font-weight: 600; pointer-events: none; }
 .docs-shell { container-type: inline-size; }
 @container (max-width: 560px) {

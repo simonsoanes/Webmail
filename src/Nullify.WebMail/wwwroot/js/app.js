@@ -357,6 +357,44 @@ window.nullifyApp = (() => {
             }
         },
 
+        /**
+         * Files dragged onto Documents: the overlay is shown here (data-drop on the root) with no
+         * round trips, and a drop hands the files to the Upload picker's own input, so Blazor reads
+         * them from an element that stays put while the upload runs.
+         */
+        docsDrop(root) {
+            if (!root || root._docsDrop) return;
+            root._docsDrop = true;
+            let depth = 0;
+            const picker = () => root.querySelector('.docs-head .file-picker input[type="file"]');
+            const hasFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+            const accepts = (e) => hasFiles(e) && !!picker() && !picker().disabled;
+            const clear = () => { depth = 0; delete root.dataset.drop; };
+            root.addEventListener('dragenter', (e) => {
+                if (!accepts(e)) return;
+                depth++;
+                root.dataset.drop = '';
+            });
+            root.addEventListener('dragleave', () => { if (depth > 0 && --depth === 0) clear(); });
+            // Files are never left to the browser here, which would open them in place of the app.
+            root.addEventListener('dragover', (e) => {
+                if (!hasFiles(e)) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = accepts(e) ? 'copy' : 'none';
+            });
+            root.addEventListener('drop', (e) => {
+                if (!hasFiles(e)) return;
+                e.preventDefault();
+                const ok = accepts(e);
+                clear();
+                if (!ok) return;
+                if (e.dataTransfer.files.length === 0) return;
+                const input = picker();
+                input.files = e.dataTransfer.files;
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+            });
+        },
+
         scrollIntoView(selector) {
             const el = document.querySelector(selector);
             if (el) el.scrollIntoView({ block: 'nearest' });

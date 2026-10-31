@@ -4,7 +4,7 @@
 @inject IJSRuntime JS
 @implements IDisposable
 
-<div class="docs-shell" @ondragenter="DragEnter">
+<div class="docs-shell" @ref="shell">
     <div class="docs-head">
         <nav class="crumbs" aria-label="Folder path">
             <button class="crumb" @onclick='() => Open("/")' title="Documents"><Icon Name="hard-drive" Size="16" /> <span>Documents</span></button>
@@ -42,7 +42,8 @@
         <div class="upload-status" role="status">
             <span class="spinner"></span>
             <span class="upload-name">Uploading @uploadName@(uploadCount > 1 ? $" ({uploadIndex} of {uploadCount})" : "")</span>
-            <div class="quota-bar"><span style="width:@uploadPercent%"></span></div>
+            <div class="quota-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="@uploadPercent"><span style="width:@uploadPercent%"></span></div>
+            <span class="upload-pct">@uploadPercent% · @MailFormat.Size(uploadSent) of @MailFormat.Size(uploadSize)</span>
             <button class="btn ghost small" @onclick="CancelUpload">Cancel</button>
         </div>
     }
@@ -112,7 +113,7 @@
                             </tr>
                             continue;
                         }
-                        <tr>
+                        <tr class="@(justUploaded.Contains(it.Name) ? "just-added" : null)" data-name="@it.Name">
                             <td class="col-name">
                                 @if (it.IsFolder)
                                 {
@@ -154,11 +155,10 @@
         </div>
     }
 
-    @if (dragging && status == Status.Ready)
+    @if (status == Status.Ready)
     {
-        <div class="drop-overlay" @ondragleave="() => dragging = false" @ondrop="() => dragging = false">
+        <div class="drop-overlay" aria-hidden="true">
             <div class="drop-hint"><Icon Name="upload" Size="28" /><span>Drop files to upload to @(path == "/" ? "Documents" : Crumbs().Last().Name)</span></div>
-            <InputFile OnChange="Upload" multiple />
         </div>
     }
 </div>
@@ -184,16 +184,27 @@
     private ElementReference nameInput;
     private bool focusName;
 
-    private bool dragging;
+    private ElementReference shell;
     private bool uploading;
     private string uploadName = "";
     private int uploadIndex, uploadCount, uploadPercent;
+    private long uploadSent, uploadSize;
+    private HashSet<string> justUploaded = new(StringComparer.OrdinalIgnoreCase);
+    private bool revealUploads;
     private CancellationTokenSource? uploadCts;
 
     protected override Task OnInitializedAsync() => Open("/");
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (firstRender) await JS.InvokeVoidAsync("nullifyApp.docsDrop", shell);
+        if (revealUploads)
+        {
+            revealUploads = false;
+            var first = Sorted().FirstOrDefault(i => justUploaded.Contains(i.Name));
+            if (first != null)
+                await JS.InvokeVoidAsync("nullifyApp.scrollIntoView", $".docs-table tr[data-name=\"{CssEscape(first.Name)}\"]");
+        }
         if (!focusName) return;
         focusName = false;
         try { await nameInput.FocusAsync(); } catch { /* row not rendered */ }
@@ -205,6 +216,7 @@
         loading = true;
         newFolder = false;
         renaming = null;
+        if (target != path) justUploaded.Clear();
         try
         {
             var result = await Dav.ListAsync(target);
@@ -364,14 +376,8 @@
 
     // ---- uploads ----
 
-    private void DragEnter(DragEventArgs e)
-    {
-        if (status == Status.Ready && !uploading && e.DataTransfer.Types.Contains("Files")) dragging = true;
-    }
-
     private async Task Upload(InputFileChangeEventArgs e)
     {
-        dragging = false;
         var files = e.GetMultipleFiles(100);
         if (files.Count == 0 || uploading) return;
 
@@ -387,6 +393,7 @@
         uploading = true;
         uploadCount = files.Count;
         uploadCts = new CancellationTokenSource();
+        justUploaded.Clear();
         var done = 0;
         try
         {
@@ -402,17 +409,21 @@
                 uploadIndex = i + 1;
                 uploadName = f.Name;
                 uploadPercent = 0;
+                uploadSent = 0;
+                uploadSize = f.Size;
                 StateHasChanged();
                 try
                 {
                     await using var source = f.OpenReadStream(MaxUploadBytes, uploadCts.Token);
-                    await using var progress = new ProgressStream(source, f.Size, pct =>
+                    await using var progress = new ProgressStream(source, f.Size, (sent, pct) =>
                     {
+                        uploadSent = sent;
                         if (pct == uploadPercent) return;
                         uploadPercent = pct;
                         _ = InvokeAsync(StateHasChanged);
                     });
                     await Dav.UploadAsync(path, f.Name, progress, f.Size, f.ContentType, overwrite, uploadCts.Token);
+                    justUploaded.Add(f.Name);
                     done++;
                 }
                 catch (OperationCanceledException) when (uploadCts.IsCancellationRequested)
@@ -435,7 +446,10 @@
         }
         if (done > 0) State.ShowToast(done == 1 ? $"Uploaded \"{uploadName}\"" : $"Uploaded {done} files");
         await Open(path);
+        revealUploads = justUploaded.Count > 0;
     }
+
+    private static string CssEscape(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"");
 
     private void CancelUpload() => uploadCts?.Cancel();
 
@@ -448,7 +462,7 @@
     public void Dispose() => uploadCts?.Cancel();
 
     /// <summary>Read-through stream that reports whole-percent progress.</summary>
-    private sealed class ProgressStream(Stream inner, long length, Action<int> report) : Stream
+    private sealed class ProgressStream(Stream inner, long length, Action<long, int> report) : Stream
     {
         private long read;
         public override bool CanRead => true;
@@ -467,7 +481,7 @@
         private int Track(int n)
         {
             read += n;
-            if (length > 0) report((int)Math.Min(100, read * 100 / length));
+            if (length > 0) report(read, (int)Math.Min(100, read * 100 / length));
             return n;
         }
     }
