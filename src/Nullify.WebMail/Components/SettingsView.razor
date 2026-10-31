@@ -431,6 +431,72 @@
                 }
                 <button class="btn accent" @onclick="DocsSave" disabled="@docsBusy">Save</button>
             </div>
+
+            <h4 class="sub-head">Your other servers</h4>
+            <p class="help" style="margin-top:0;">
+                Add your own WebDAV servers alongside the one above. With more than one, Documents opens to a list of them.
+            </p>
+            @foreach (var server in docServers)
+            {
+                var sv = server;
+                <div class="setting-row alias-row">
+                    <div>
+                        <strong>@sv.Name</strong>
+                        <div class="desc">@sv.Url @if (sv.PasswordSource == DavPasswordSource.NeedsReentry) { <span class="tag">Password needs re-entering</span> }</div>
+                    </div>
+                    <span class="btn-group">
+                        <button class="btn small ghost" @onclick="() => EditDocServer(sv)" disabled="@docsBusy">Edit</button>
+                        <button class="btn small danger" @onclick="() => RemoveDocServer(sv)" disabled="@docsBusy">Remove</button>
+                    </span>
+                </div>
+            }
+            @if (serverFormOpen)
+            {
+                <div class="field" style="margin-top:.75rem;">
+                    <label for="dav-server-name">Name</label>
+                    <input id="dav-server-name" type="text" @bind="serverName" @bind:event="oninput" maxlength="100" placeholder="Team share" />
+                </div>
+                <div class="field">
+                    <label for="dav-server-url">Server URL</label>
+                    <input id="dav-server-url" type="url" @bind="serverUrl" @bind:event="oninput" autocomplete="off" spellcheck="false"
+                           placeholder="https://files.example.org/remote.php/dav/files/you/" />
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="dav-server-user">Username</label>
+                        <input id="dav-server-user" type="text" @bind="serverUser" @bind:event="oninput" autocomplete="off" spellcheck="false"
+                               placeholder="@docs.DefaultUsername" />
+                    </div>
+                    <div class="field">
+                        <label for="dav-server-pass">Password</label>
+                        <input id="dav-server-pass" type="password" @bind="serverPassword" @bind:event="oninput" autocomplete="new-password"
+                               placeholder="@ServerPasswordPlaceholder" />
+                    </div>
+                </div>
+                @if (serverTest != null)
+                {
+                    <div class="alert @(serverTest.Success ? "ok" : "err")" style="margin-top:.9rem;" role="status">
+                        <Icon Name="@(serverTest.Success ? "check" : "alert")" Size="15" />
+                        <div>@serverTest.Message</div>
+                    </div>
+                }
+                <div class="card-actions">
+                    <button class="btn ghost" @onclick="CancelDocServer" disabled="@docsBusy" style="margin-right:auto;">Cancel</button>
+                    <button class="btn" @onclick="TestDocServer" disabled="@(docsBusy || serverUrl.Trim().Length == 0)">
+                        @if (serverTesting) { <span class="spinner"></span> } else { <Icon Name="refresh" Size="15" /> }
+                        Test connection
+                    </button>
+                    <button class="btn accent" @onclick="SaveDocServer" disabled="@(docsBusy || serverName.Trim().Length == 0 || serverUrl.Trim().Length == 0)">
+                        @(editingServer == null ? "Add server" : "Save server")
+                    </button>
+                </div>
+            }
+            else
+            {
+                <div class="card-actions">
+                    <button class="btn" @onclick="AddDocServer" disabled="@docsBusy"><Icon Name="plus" Size="15" /> Add a server</button>
+                </div>
+            }
         }
     </section>
 
@@ -831,6 +897,7 @@
             docsUrl = docs.Url ?? "";
             docsUser = docs.Username ?? "";
             docsPassword = "";
+            docServers = await Docs.ListExtraServersAsync();
         }
         catch (Exception ex)
         {
@@ -879,6 +946,76 @@
             await Docs.ResetAsync();
             await AfterDocsChange("Documents settings reset to defaults");
         }
+        finally { docsBusy = false; }
+    }
+
+    // Other servers the user added themselves.
+    private IReadOnlyList<DavServerDto> docServers = [];
+    private bool serverFormOpen, serverTesting;
+    private DavServerDto? editingServer;
+    private string serverName = "", serverUrl = "", serverUser = "", serverPassword = "";
+    private CalDavTestResult? serverTest;
+
+    private string ServerPasswordPlaceholder => editingServer?.PasswordSource == DavPasswordSource.Saved
+        ? "•••••••• saved; type to replace"
+        : docs?.CalDavPasswordIsSeparate == true ? "Same as your calendar password" : "Same as your mail password";
+
+    private void AddDocServer() => OpenServerForm(null);
+
+    private void EditDocServer(DavServerDto server) => OpenServerForm(server);
+
+    private void OpenServerForm(DavServerDto? server)
+    {
+        editingServer = server;
+        serverName = server?.Name ?? "";
+        serverUrl = server?.Url ?? "";
+        serverUser = server?.Username ?? "";
+        serverPassword = "";
+        serverTest = null;
+        serverFormOpen = true;
+    }
+
+    private void CancelDocServer()
+    {
+        serverFormOpen = false;
+        editingServer = null;
+        serverTest = null;
+    }
+
+    private async Task TestDocServer()
+    {
+        docsBusy = serverTesting = true;
+        serverTest = null;
+        try { serverTest = await Docs.TestAsync(serverUrl, serverUser, serverPassword, editingServer?.Id ?? WebDavService.NewServer); }
+        finally { docsBusy = serverTesting = false; }
+    }
+
+    private async Task SaveDocServer()
+    {
+        docsBusy = true;
+        try
+        {
+            await Docs.SaveServerAsync(editingServer?.Id, serverName, serverUrl, serverUser, serverPassword);
+            var message = editingServer == null ? $"Added \"{serverName.Trim()}\"" : $"Saved \"{serverName.Trim()}\"";
+            CancelDocServer();
+            await AfterDocsChange(message);
+        }
+        catch (Exception ex) when (ex is FormatException or CalDavException) { State.ShowToast(ex.Message, isError: true); }
+        catch (Exception ex) { State.ShowToast($"Could not save the server: {ex.Message}", isError: true); }
+        finally { docsBusy = false; }
+    }
+
+    private async Task RemoveDocServer(DavServerDto server)
+    {
+        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Remove \"{server.Name}\" from Documents? Its files stay on the server.")) return;
+        docsBusy = true;
+        try
+        {
+            await Docs.RemoveServerAsync(server.Id!);
+            if (editingServer?.Id == server.Id) CancelDocServer();
+            await AfterDocsChange($"Removed \"{server.Name}\"");
+        }
+        catch (Exception ex) { State.ShowToast($"Could not remove the server: {ex.Message}", isError: true); }
         finally { docsBusy = false; }
     }
 

@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
 using System.Xml.Linq;
 using Nullify.WebMail.Shared;
 
@@ -15,6 +16,9 @@ namespace Nullify.WebMail.Services;
 /// URL: the user's own, else the one the administrator set for their domain, else the server-wide
 /// default. Credentials: the user's own, else their CalDAV/CardDAV ones (which themselves default
 /// to the mail login and password). A separate password is sealed under the mail password.
+/// Users can also add their own extra servers alongside that one; each is a single preference
+/// (<c>webdav.server.{id}</c>) holding its name, URL, username and sealed password. File calls take
+/// a server id: null for the main account, otherwise one of the extras.
 /// </summary>
 public sealed class WebDavService(
     ApiService api,
@@ -25,10 +29,16 @@ public sealed class WebDavService(
 {
     public const string HttpClientName = "webdav";
     private const string EnabledKey = "webdav.enabled", UrlKey = "webdav.url", UserKey = "webdav.username", SecretKey = "webdav.password";
+    private const string ServerKeyPrefix = "webdav.server.";
+    /// <summary>Test an extra server that hasn't been saved yet.</summary>
+    public const string NewServer = "new";
     private static readonly XNamespace Dav = "DAV:";
     private static readonly TimeSpan MetadataTimeout = TimeSpan.FromSeconds(30);
 
     private sealed record Account(Uri Root, string Username, string Password);
+
+    /// <summary>What is stored for one of the user's extra servers. <see cref="Secret"/> is sealed.</summary>
+    private sealed record StoredServer(string Name, string Url, string? Username, string? Secret);
 
     private CredentialInfo Cred =>
         session.Credential ?? throw new InvalidOperationException("Not authenticated.");
@@ -59,11 +69,63 @@ public sealed class WebDavService(
             defaultUrl, defaultUser, calDavSeparate);
     }
 
-    /// <summary>Show the Documents menu: switched on (by the user or for their domain) and a URL is known.</summary>
-    public async Task<bool> IsAvailableAsync()
+    /// <summary>Show the Documents menu: the main account is switched on and has a URL, or the user added servers.</summary>
+    public async Task<bool> IsAvailableAsync() => (await ListServersAsync()).Count > 0;
+
+    /// <summary>Every server Documents can open: the main account (when usable) first, then the user's own.</summary>
+    public async Task<IReadOnlyList<DavServerDto>> ListServersAsync()
     {
+        var list = new List<DavServerDto>();
         var s = await GetSettingsAsync();
-        return s.Enabled && !string.IsNullOrWhiteSpace(s.Url ?? s.DefaultUrl);
+        var mainUrl = s.Url ?? s.DefaultUrl;
+        if (s.Enabled && !string.IsNullOrWhiteSpace(mainUrl))
+            list.Add(new DavServerDto(null, "Documents", mainUrl, s.Username ?? s.DefaultUsername, s.PasswordSource));
+        list.AddRange(await ListExtraServersAsync());
+        return list;
+    }
+
+    /// <summary>The servers the user added themselves, by name.</summary>
+    public async Task<IReadOnlyList<DavServerDto>> ListExtraServersAsync()
+    {
+        var prefs = await LoadPrefsAsync();
+        return prefs.Where(p => p.Key.StartsWith(ServerKeyPrefix, StringComparison.Ordinal))
+            .Select(p => (Id: p.Key[ServerKeyPrefix.Length..], Server: ParseServer(p.Value)))
+            .Where(x => x.Server != null)
+            .Select(x => new DavServerDto(x.Id, x.Server!.Name, x.Server.Url, x.Server.Username, PasswordSource(x.Server.Secret)))
+            .OrderBy(x => x.Name, StringComparer.CurrentCultureIgnoreCase)
+            .ToList();
+    }
+
+    /// <summary>Add (null <paramref name="id"/>) or update one of the user's own servers; returns its id.</summary>
+    /// <param name="newPassword">Null/empty keeps a working saved password; a value replaces it.</param>
+    public async Task<string> SaveServerAsync(string? id, string name, string url, string? username, string? newPassword)
+    {
+        name = name.Trim();
+        if (name.Length == 0) throw new FormatException("Give the server a name.");
+        if (name.Length > 100) throw new FormatException("That name is too long.");
+        if (string.IsNullOrWhiteSpace(url)) throw new FormatException("A server URL is required.");
+        url = CalDavAccountService.NormalizeUrl(url);
+
+        StoredServer? existing = null;
+        if (id != null)
+        {
+            ValidServerId(id);
+            existing = ParseServer((await LoadPrefsAsync()).GetValueOrDefault(ServerKeyPrefix + id))
+                       ?? throw new CalDavException("That server no longer exists.");
+        }
+        id ??= Guid.NewGuid().ToString("N")[..12];
+        var secret = !string.IsNullOrEmpty(newPassword) ? SecretBox.Seal(newPassword, Cred.Password, SealContext)
+            : PasswordSource(existing?.Secret) == DavPasswordSource.Saved ? existing!.Secret
+            : null; // none yet, or one that can never open again: fall back to the calendar password
+        var stored = new StoredServer(name, url, string.IsNullOrWhiteSpace(username) ? null : username.Trim(), secret);
+        await api.SetPreferenceAsync(ServerKeyPrefix + id, JsonSerializer.Serialize(stored));
+        return id;
+    }
+
+    public async Task RemoveServerAsync(string id)
+    {
+        ValidServerId(id);
+        await api.SetPreferenceAsync(ServerKeyPrefix + id, null);
     }
 
     /// <param name="newPassword">Null/empty keeps a working saved password; a value replaces it.</param>
@@ -88,10 +150,14 @@ public sealed class WebDavService(
     }
 
     /// <summary>Check settings without saving; blank fields fall back as they would when saved.</summary>
-    public async Task<CalDavTestResult> TestAsync(string? url, string? username, string? password)
+    /// <param name="server">
+    /// Whose saved details blank fields fall back to: null for the main account, an extra server's id,
+    /// or <see cref="NewServer"/> for one not saved yet (blank fields then mean the calendar account).
+    /// </param>
+    public async Task<CalDavTestResult> TestAsync(string? url, string? username, string? password, string? server = null)
     {
         Account account;
-        try { account = await ResolveAccountAsync(url, username, password); }
+        try { account = await ResolveAccountAsync(server, url, username, password); }
         catch (Exception ex) when (ex is CalDavException or InvalidOperationException or FormatException)
         {
             return new(false, ex.Message, []);
@@ -134,27 +200,27 @@ public sealed class WebDavService(
     // ------------------------------------------------------------------ files
 
     /// <exception cref="CalDavException">Not configured, or the server refused.</exception>
-    public async Task<DavListing> ListAsync(string path) => await ListAsync(await ResolveAccountAsync(), path);
+    public async Task<DavListing> ListAsync(string? server, string path) => await ListAsync(await ResolveAccountAsync(server), path);
 
-    public async Task CreateFolderAsync(string parentPath, string name)
+    public async Task CreateFolderAsync(string? server, string parentPath, string name)
     {
-        var account = await ResolveAccountAsync();
+        var account = await ResolveAccountAsync(server);
         var path = Combine(parentPath, ValidName(name));
         using var resp = await SendAsync(account, new HttpMethod("MKCOL"), ToUri(account, path, folder: true), null, []);
         if (resp.StatusCode == HttpStatusCode.MethodNotAllowed) throw new CalDavException($"\"{name}\" already exists.");
         EnsureSuccess(resp, "create the folder");
     }
 
-    public async Task DeleteAsync(DavItem item)
+    public async Task DeleteAsync(string? server, DavItem item)
     {
-        var account = await ResolveAccountAsync();
+        var account = await ResolveAccountAsync(server);
         using var resp = await SendAsync(account, HttpMethod.Delete, ToUri(account, item.Path, item.IsFolder), null, []);
         if (resp.StatusCode != HttpStatusCode.NotFound) EnsureSuccess(resp, "delete it");
     }
 
-    public async Task RenameAsync(DavItem item, string newName)
+    public async Task RenameAsync(string? server, DavItem item, string newName)
     {
-        var account = await ResolveAccountAsync();
+        var account = await ResolveAccountAsync(server);
         var parent = item.Path[..item.Path.TrimEnd('/').LastIndexOf('/')];
         var target = ToUri(account, Combine(parent, ValidName(newName)), item.IsFolder);
         using var resp = await SendAsync(account, new HttpMethod("MOVE"), ToUri(account, item.Path, item.IsFolder), null,
@@ -164,10 +230,10 @@ public sealed class WebDavService(
     }
 
     /// <summary>Stream a file up. Without <paramref name="overwrite"/>, an existing file of that name is an error.</summary>
-    public async Task UploadAsync(string folderPath, string fileName, Stream content, long length, string? contentType,
+    public async Task UploadAsync(string? server, string folderPath, string fileName, Stream content, long length, string? contentType,
         bool overwrite, CancellationToken ct)
     {
-        var account = await ResolveAccountAsync();
+        var account = await ResolveAccountAsync(server);
         var uri = ToUri(account, Combine(folderPath, ValidName(fileName)), folder: false);
         var body = new StreamContent(content);
         body.Headers.ContentType = MediaTypeHeaderValue.TryParse(contentType, out var mt) ? mt : new MediaTypeHeaderValue("application/octet-stream");
@@ -180,9 +246,9 @@ public sealed class WebDavService(
     }
 
     /// <summary>Open a file for streaming to the browser. The caller disposes the response.</summary>
-    public async Task<HttpResponseMessage> OpenDownloadAsync(string path, CancellationToken ct)
+    public async Task<HttpResponseMessage> OpenDownloadAsync(string? server, string path, CancellationToken ct)
     {
-        var account = await ResolveAccountAsync();
+        var account = await ResolveAccountAsync(server);
         var resp = await SendAsync(account, HttpMethod.Get, ToUri(account, NormalizePath(path), folder: false), null, [], ct,
             metadata: false, streamBody: true);
         if (!resp.IsSuccessStatusCode)
@@ -200,17 +266,32 @@ public sealed class WebDavService(
 
     // ------------------------------------------------------------------ internals
 
-    private async Task<Account> ResolveAccountAsync(string? url = null, string? username = null, string? password = null)
+    /// <param name="server">Null for the main account, else the id of one of the user's own servers.</param>
+    private async Task<Account> ResolveAccountAsync(string? server, string? url = null, string? username = null, string? password = null)
     {
         var prefs = await LoadPrefsAsync();
-        var (_, domainUrl) = await DomainSettingsAsync();
-        var root = !string.IsNullOrWhiteSpace(url) ? url : prefs.GetValueOrDefault(UrlKey) ?? domainUrl ?? GlobalUrl;
+        string? root, storedUser, secret;
+        if (server == NewServer)
+            (root, storedUser, secret) = (null, null, null);
+        else if (string.IsNullOrEmpty(server))
+        {
+            var (_, domainUrl) = await DomainSettingsAsync();
+            root = prefs.GetValueOrDefault(UrlKey) ?? domainUrl ?? GlobalUrl;
+            (storedUser, secret) = (prefs.GetValueOrDefault(UserKey), prefs.GetValueOrDefault(SecretKey));
+        }
+        else
+        {
+            ValidServerId(server);
+            var stored = ParseServer(prefs.GetValueOrDefault(ServerKeyPrefix + server))
+                         ?? throw new CalDavException("That server no longer exists.");
+            (root, storedUser, secret) = (stored.Url, stored.Username, stored.Secret);
+        }
+        if (!string.IsNullOrWhiteSpace(url)) root = url;
         if (string.IsNullOrWhiteSpace(root)) throw new CalDavException("No Documents server is configured.");
         var rootUri = new Uri(CalDavAccountService.NormalizeUrl(root));
         if (!rootUri.AbsolutePath.EndsWith('/')) rootUri = new Uri(rootUri.AbsoluteUri + "/");
 
-        var user = !string.IsNullOrWhiteSpace(username) ? username.Trim() : prefs.GetValueOrDefault(UserKey);
-        var secret = prefs.GetValueOrDefault(SecretKey);
+        var user = !string.IsNullOrWhiteSpace(username) ? username.Trim() : storedUser;
         string pass;
         if (!string.IsNullOrEmpty(password)) pass = password;
         else if (!string.IsNullOrEmpty(secret))
@@ -378,6 +459,20 @@ public sealed class WebDavService(
         string.IsNullOrEmpty(secret) ? DavPasswordSource.MailPassword
         : SecretBox.TryOpen(secret, Cred.Password, SealContext, out _) ? DavPasswordSource.Saved
         : DavPasswordSource.NeedsReentry;
+
+    private static StoredServer? ParseServer(string? json)
+    {
+        if (string.IsNullOrEmpty(json)) return null;
+        try { return JsonSerializer.Deserialize<StoredServer>(json) is { Name.Length: > 0, Url.Length: > 0 } s ? s : null; }
+        catch (JsonException) { return null; }
+    }
+
+    /// <summary>Server ids are our own lower-case hex; anything else never reaches a preference key.</summary>
+    private static void ValidServerId(string id)
+    {
+        if (id.Length is 0 or > 32 || !id.All(c => char.IsAsciiDigit(c) || c is >= 'a' and <= 'f'))
+            throw new CalDavException("That server no longer exists.");
+    }
 
     private async Task<Dictionary<string, string>> LoadPrefsAsync() =>
         (await api.GetPreferencesAsync())

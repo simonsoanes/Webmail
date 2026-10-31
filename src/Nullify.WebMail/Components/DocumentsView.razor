@@ -7,7 +7,12 @@
 <div class="docs-shell" @ref="shell">
     <div class="docs-head">
         <nav class="crumbs" aria-label="Folder path">
-            <button class="crumb" @onclick='() => Open("/")' title="Documents"><Icon Name="hard-drive" Size="16" /> <span>Documents</span></button>
+            <button class="crumb" @onclick="GoHome" title="Documents"><Icon Name="hard-drive" Size="16" /> <span>Documents</span></button>
+            @if (MultiServer && status != Status.Servers && current != null)
+            {
+                <Icon Name="chevron-right" Size="14" Class="crumb-sep" />
+                <button class="crumb" @onclick='() => Open("/")'>@current.Name</button>
+            }
             @foreach (var (name, path) in Crumbs())
             {
                 var p = path;
@@ -50,6 +55,29 @@
 
     @switch (status)
     {
+        case Status.Servers:
+            <div class="docs-table-wrap">
+                <table class="docs-table">
+                    <thead>
+                        <tr><th class="col-name">Name</th><th class="col-mod">Server</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var server in servers)
+                        {
+                            var sv = server;
+                            <tr>
+                                <td class="col-name">
+                                    <button class="doc-name" @onclick="() => OpenServer(sv)">
+                                        <Icon Name="hard-drive" Size="18" Class="ic-folder" /><span>@sv.Name</span>
+                                    </button>
+                                </td>
+                                <td class="col-mod" title="@sv.Url">@HostOf(sv.Url)</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            break;
         case Status.NotConfigured:
             <div class="empty-state">
                 <div class="empty-icon"><Icon Name="hard-drive" Size="26" /></div>
@@ -64,7 +92,7 @@
         case Status.Error:
             <div class="docs-pad">
                 <div class="alert err" role="alert"><Icon Name="alert" Size="15" />
-                    <div>@error @if (path != "/") { <button class="link-btn" @onclick='() => Open("/")'>Go to the top folder</button> } else { <button class="link-btn" @onclick="OpenSettings">Check settings</button> }</div>
+                    <div>@error @if (path != "/") { <button class="link-btn" @onclick='() => Open("/")'>Go to the top folder</button> } else if (MultiServer) { <button class="link-btn" @onclick="GoHome">Back to all servers</button> } else { <button class="link-btn" @onclick="OpenSettings">Check settings</button> }</div>
                 </div>
             </div>
             break;
@@ -158,16 +186,18 @@
     @if (status == Status.Ready)
     {
         <div class="drop-overlay" aria-hidden="true">
-            <div class="drop-hint"><Icon Name="upload" Size="28" /><span>Drop files to upload to @(path == "/" ? "Documents" : Crumbs().Last().Name)</span></div>
+            <div class="drop-hint"><Icon Name="upload" Size="28" /><span>Drop files to upload to @(path == "/" ? current?.Name ?? "Documents" : Crumbs().Last().Name)</span></div>
         </div>
     }
 </div>
 
 @code {
-    private enum Status { Loading, Ready, NotConfigured, NeedsReentry, Error }
+    private enum Status { Loading, Servers, Ready, NotConfigured, NeedsReentry, Error }
 
     private const long MaxUploadBytes = 2L * 1024 * 1024 * 1024;
 
+    private IReadOnlyList<DavServerDto> servers = [];
+    private DavServerDto? current;
     private string path = "/";
     private DavListing? listing;
     private Status status = Status.Loading;
@@ -193,7 +223,56 @@
     private bool revealUploads;
     private CancellationTokenSource? uploadCts;
 
-    protected override Task OnInitializedAsync() => Open("/");
+    private bool MultiServer => servers.Count > 1;
+
+    protected override Task OnInitializedAsync() => GoHome();
+
+    /// <summary>One server opens straight into its files; with several, the top level lists them.</summary>
+    private async Task GoHome()
+    {
+        var token = ++loadToken;
+        loading = true;
+        try
+        {
+            var list = await Dav.ListServersAsync();
+            if (token != loadToken) return;
+            servers = list;
+        }
+        catch (Exception ex)
+        {
+            if (token != loadToken) return;
+            loading = false;
+            status = Status.Error;
+            error = ex.Message;
+            return;
+        }
+        loading = false;
+        switch (servers.Count)
+        {
+            case 0:
+                status = Status.NotConfigured;
+                break;
+            case 1:
+                await OpenServer(servers[0]);
+                break;
+            default:
+                current = null;
+                listing = null;
+                path = "/";
+                justUploaded.Clear();
+                status = Status.Servers;
+                break;
+        }
+    }
+
+    private Task OpenServer(DavServerDto server)
+    {
+        current = server;
+        path = "";
+        return Open("/");
+    }
+
+    private static string HostOf(string url) => Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host : url;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -219,7 +298,7 @@
         if (target != path) justUploaded.Clear();
         try
         {
-            var result = await Dav.ListAsync(target);
+            var result = await Dav.ListAsync(current?.Id, target);
             if (token != loadToken) return;
             listing = result;
             path = result.Path.EndsWith('/') ? result.Path : result.Path + "/";
@@ -297,7 +376,9 @@
         };
     }
 
-    private static string DownloadUrl(DavItem item) => $"api/files/download?path={Uri.EscapeDataString(item.Path)}";
+    private string DownloadUrl(DavItem item) =>
+        $"api/files/download?path={Uri.EscapeDataString(item.Path)}"
+        + (current?.Id is { } id ? $"&server={Uri.EscapeDataString(id)}" : "");
 
     // ---- folders, rename, delete ----
 
@@ -319,7 +400,7 @@
     {
         try
         {
-            await Dav.CreateFolderAsync(path, nameValue);
+            await Dav.CreateFolderAsync(current?.Id, path, nameValue);
             State.ShowToast($"Created \"{nameValue.Trim()}\"");
             await Open(path);
         }
@@ -348,7 +429,7 @@
         if (nameValue.Trim() == item.Name) { renaming = null; return; }
         try
         {
-            await Dav.RenameAsync(item, nameValue);
+            await Dav.RenameAsync(current?.Id, item, nameValue);
             State.ShowToast($"Renamed to \"{nameValue.Trim()}\"");
             await Open(path);
         }
@@ -364,7 +445,7 @@
         if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Delete {what}? This can't be undone.")) return;
         try
         {
-            await Dav.DeleteAsync(item);
+            await Dav.DeleteAsync(current?.Id, item);
             State.ShowToast($"Deleted \"{item.Name}\"");
             await Open(path);
         }
@@ -422,7 +503,7 @@
                         uploadPercent = pct;
                         _ = InvokeAsync(StateHasChanged);
                     });
-                    await Dav.UploadAsync(path, f.Name, progress, f.Size, f.ContentType, overwrite, uploadCts.Token);
+                    await Dav.UploadAsync(current?.Id, path, f.Name, progress, f.Size, f.ContentType, overwrite, uploadCts.Token);
                     justUploaded.Add(f.Name);
                     done++;
                 }

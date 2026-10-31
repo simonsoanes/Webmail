@@ -15,7 +15,7 @@ namespace Nullify.WebMail.Controllers;
 public class FilesController(UserSession session, WebDavService dav) : ControllerBase
 {
     [HttpGet("download")]
-    public async Task Download([FromQuery] string path, CancellationToken ct)
+    public async Task Download([FromQuery] string path, [FromQuery] string? server, CancellationToken ct)
     {
         await session.CaptureAsync(ct);
         if (!session.IsAuthenticated)
@@ -27,7 +27,7 @@ public class FilesController(UserSession session, WebDavService dav) : Controlle
         HttpResponseMessage upstream;
         try
         {
-            upstream = await dav.OpenDownloadAsync(path, ct);
+            upstream = await dav.OpenDownloadAsync(server, path, ct);
         }
         catch (Exception ex) when (ex is CalDavException or InvalidOperationException)
         {

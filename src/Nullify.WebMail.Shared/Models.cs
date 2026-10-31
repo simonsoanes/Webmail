@@ -300,6 +300,12 @@ public sealed record DocumentsSettingsDto(
     bool Enabled, bool EnabledByDomain, string? Url, string? Username, DavPasswordSource PasswordSource,
     string? DefaultUrl, string DefaultUsername, bool CalDavPasswordIsSeparate);
 
+/// <summary>
+/// One server Documents can open. <see cref="Id"/> is null for the main account (the one the
+/// administrator's default applies to) and set for servers the user added themselves.
+/// </summary>
+public sealed record DavServerDto(string? Id, string Name, string Url, string? Username, DavPasswordSource PasswordSource);
+
 /// <summary>A file or folder in the WebDAV store. <see cref="Path"/> is relative to the account root, e.g. "/Projects/Q3.pdf".</summary>
 public sealed record DavItem(string Name, string Path, bool IsFolder, long? Size, DateTimeOffset? Modified, string? ContentType);
 

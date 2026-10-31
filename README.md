@@ -7,7 +7,7 @@ A self-hosted **webmail client** for your existing IMAP/SMTP server, with calend
 - **OpenPGP** in the browser: key generation, import and export, encrypt, decrypt, sign and verify, with optional unlock by a security key (WebAuthn PRF). The OpenPGP cryptography runs in the browser, and private keys are only stored in protected form.
 - **Calendar and contacts** from any CalDAV/CardDAV server, with recipient autocomplete from your address books. Month, week and day views; drag across days or times to create an event there, and set a reminder on it. Calendars shared with you and those of people who made you their delegate can be turned on and off, and you can subscribe to published internet calendars (webcal/.ics) and public CalDAV calendars
 - **Tasks and notes** kept on the same CalDAV server (as VTODOs and VJOURNALs), so they sync with other CalDAV apps. If none of your calendars accept them, the app can create a task list or notes list for you
-- **Files** from a WebDAV server
+- **Files** from a WebDAV server; administrators set a default per domain and users can add their own servers alongside it
 - **Filters** via ManageSieve, with a Sieve script editor
 - **Multi-domain**: each email domain can be routed to its own IMAP, SMTP and Sieve servers; administrators can restrict sign-in to configured domains
 - **No password database**: users sign in with their mail credentials, which are checked against the IMAP server and then held only in server memory for the session. The browser's cookie carries just a random session key.
