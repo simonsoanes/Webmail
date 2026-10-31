@@ -6,6 +6,7 @@
 @inject NavigationManager Nav
 @inject CalDavAccountService CalDav
 @inject WebDavService Docs
+@implements IDisposable
 
 <div class="settings-page">
     <h2>Settings</h2>
@@ -30,6 +31,24 @@
         </div>
     </section>
 
+    @if (install is { Installed: false })
+    {
+        <section class="card" id="install-settings">
+            <div class="card-head">
+                <div class="icon-tile"><Icon Name="download" /></div>
+                <div><h3>Install as an app</h3><p>Opens in its own window, shows notifications for new mail and reminders, and opens calendar files you double-click.</p></div>
+            </div>
+            @if (install.CanPrompt)
+            {
+                <button class="btn accent small" @onclick="Install"><Icon Name="download" Size="14" /> Install @State.BrandTitle WebMail</button>
+            }
+            else
+            {
+                <div class="notice"><Icon Name="monitor" Size="15" /><span>@InstallHint</span></div>
+            }
+        </section>
+    }
+
     <section class="card" id="notification-settings">
         <div class="card-head">
             <div class="icon-tile"><Icon Name="bell" /></div>
@@ -47,7 +66,7 @@
         {
             @if (!notify.Installed)
             {
-                <div class="notice"><Icon Name="monitor" Size="15" /><span>Install @State.BrandTitle WebMail as an app (from your browser's menu) to get notifications. Only the installed app shows them.</span></div>
+                <div class="notice"><Icon Name="monitor" Size="15" /><span>Install @State.BrandTitle WebMail as an app (see above) to get notifications. Only the installed app shows them.</span></div>
             }
             @if (notify.Permission == "denied")
             {
@@ -677,9 +696,54 @@
         {
             theme = await JS.InvokeAsync<string>("nullifyApp.getTheme");
             notify = await JS.InvokeAsync<Notifications.NotifyState>("nullifyApp.notifications.state");
+            install = await JS.InvokeAsync<InstallState>("nullifyApp.install.state");
+            selfRef = DotNetObjectReference.Create(this);
+            await JS.InvokeVoidAsync("nullifyApp.install.watch", selfRef);
             StateHasChanged();
         }
         catch { /* keep default */ }
+    }
+
+    // ---- installing ----
+
+    private sealed record InstallState(bool Installed, bool CanPrompt, string Platform);
+
+    private InstallState? install;
+    private DotNetObjectReference<SettingsView>? selfRef;
+
+    private string InstallHint => install?.Platform switch
+    {
+        "ios" => "In Safari, tap the Share button, then Add to Home Screen.",
+        "safari" => "In Safari, choose File › Add to Dock.",
+        "firefox" => "Firefox doesn't install web apps on the desktop. Open this page in Chrome, Edge or Safari to install it, or on Android use Firefox's menu › Install.",
+        _ => "Use Install in your browser's menu or address bar. If it isn't there yet, reload the page and try again.",
+    };
+
+    private async Task Install()
+    {
+        var outcome = await JS.InvokeAsync<string>("nullifyApp.install.prompt");
+        await RefreshInstall();
+        if (outcome == "accepted") State.ShowToast("Installed. Open it from your apps or desktop.");
+    }
+
+    [JSInvokable]
+    public Task OnInstallChanged() => InvokeAsync(RefreshInstall);
+
+    private async Task RefreshInstall()
+    {
+        try
+        {
+            install = await JS.InvokeAsync<InstallState>("nullifyApp.install.state");
+            StateHasChanged();
+        }
+        catch (JSDisconnectedException) { }
+    }
+
+    public void Dispose()
+    {
+        if (selfRef == null) return;
+        _ = JS.InvokeVoidAsync("nullifyApp.install.watch", (object?)null).AsTask().ContinueWith(_ => { });
+        selfRef.Dispose();
     }
 
     // ---- notifications ----

@@ -112,7 +112,7 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsSe
 
     private static MessageSummary ToSummary(MessageEnvelope e) => new(
         e.Uid, e.Subject, e.From, e.To, e.Date, e.Size,
-        e.IsSeen, e.IsFlagged, e.IsAnswered, e.IsDraft, e.MessageId, e.HasAttachments)
+        e.IsSeen, e.IsFlagged, e.IsAnswered, e.IsDraft, e.MessageId, e.HasAttachments, e.IsImportant)
     {
         Keywords = e.Keywords,
     };

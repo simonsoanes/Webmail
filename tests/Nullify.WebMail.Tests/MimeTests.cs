@@ -124,6 +124,8 @@ public class MimeTests
         StringAssert.Contains(mime, "Content-ID: <img1.abc@webmail>");
 
         var parsed = MimeParser.Parse(Encoding.ASCII.GetBytes(mime));
+        Assert.IsTrue(MailFormat.IsImportant(parsed.Headers.GetValueOrDefault("Importance"),
+            parsed.Headers.GetValueOrDefault("X-Priority"), parsed.Headers.GetValueOrDefault("Priority")));
         StringAssert.Contains(parsed.HtmlBody, "cid:img1.abc@webmail");
         Assert.AreEqual("Look [photo.png]", parsed.TextBody?.TrimEnd());
         var photo = parsed.Attachments.Single(a => a.Filename == "photo.png");
@@ -140,6 +142,17 @@ public class MimeTests
         Assert.IsFalse(mime.Contains("Importance:") || mime.Contains("X-Priority:"));
         StringAssert.StartsWith(mime[mime.IndexOf("Content-Type:")..], "Content-Type: text/plain");
     }
+
+    [TestMethod]
+    [DataRow("High", null, null, true)]
+    [DataRow(null, "1 (Highest)", null, true)]
+    [DataRow(null, "2", null, true)]
+    [DataRow(null, null, "urgent", true)]
+    [DataRow("normal", "3 (Normal)", "normal", false)]
+    [DataRow("low", "5", "non-urgent", false)]
+    [DataRow(null, null, null, false)]
+    public void IsImportant_ReadsEveryPriorityHeader(string? importance, string? xPriority, string? priority, bool expected) =>
+        Assert.AreEqual(expected, MailFormat.IsImportant(importance, xPriority, priority));
 
     [TestMethod]
     public void UidSet_CompactsRuns() =>

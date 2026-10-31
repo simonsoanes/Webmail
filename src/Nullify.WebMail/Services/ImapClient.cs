@@ -332,7 +332,7 @@ public sealed partial class ImapSession : IAsyncDisposable
     // ------------------------------------------------------------------ messages
 
     private const string EnvelopeItems =
-        "UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID)]";
+        "UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID IMPORTANCE X-PRIORITY PRIORITY)]";
 
     /// <summary>Fetch envelopes for a page of a selected folder (newest first).</summary>
     public async Task<IReadOnlyList<MessageEnvelope>> FetchEnvelopesAsync(int totalMessages, int page, int pageSize)
@@ -363,7 +363,7 @@ public sealed partial class ImapSession : IAsyncDisposable
         return messages;
     }
 
-    private static readonly string[] EnvelopeHeaders = ["From", "To", "Cc", "Subject", "Date", "Message-ID"];
+    private static readonly string[] EnvelopeHeaders = ["From", "To", "Cc", "Subject", "Date", "Message-ID", "Importance", "X-Priority", "Priority"];
 
     private static List<MessageEnvelope> ParseEnvelopes(IReadOnlyList<string> untagged)
     {
@@ -485,6 +485,7 @@ public sealed partial class ImapSession : IAsyncDisposable
             IsDeleted = flags.Contains("Deleted"),
             IsDraft = flags.Contains("Draft"),
             HasAttachments = f.ContainsKey("attach"),
+            IsImportant = MailFormat.IsImportant(f.GetValueOrDefault("Importance"), f.GetValueOrDefault("X-Priority"), f.GetValueOrDefault("Priority")),
             Cc = MimeText.Decode(f.GetValueOrDefault("Cc", "")),
             MessageId = f.GetValueOrDefault("Message-ID", ""),
             Flags = flags,
@@ -842,6 +843,8 @@ public sealed record MessageEnvelope
     public bool IsDeleted { get; init; }
     public bool IsDraft { get; init; }
     public bool HasAttachments { get; init; }
+    /// <summary>The sender marked it high priority (Importance, X-Priority or Priority header).</summary>
+    public bool IsImportant { get; init; }
     public string Cc { get; init; } = "";
     public string MessageId { get; init; } = "";
     public HashSet<string> Flags { get; init; } = new();

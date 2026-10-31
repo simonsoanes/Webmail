@@ -86,6 +86,10 @@
         var cc = MailFormat.ParseAddressList(Header("Cc"));
         <div class="reader-inner">
             <h1 class="reader-subject">@(string.IsNullOrWhiteSpace(Header("Subject")) ? "(no subject)" : Header("Subject"))</h1>
+            @if (MailFormat.IsImportant(Header("Importance"), Header("X-Priority"), Header("Priority")))
+            {
+                <div class="important-banner"><Icon Name="important" Size="15" /><span>The sender marked this message as important.</span></div>
+            }
             @if (summary != null && MailTags.Tags(summary.Keywords).ToList() is { Count: > 0 } tags)
             {
                 <div class="reader-tags">

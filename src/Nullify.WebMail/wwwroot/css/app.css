@@ -336,6 +336,8 @@ button:focus:not(:focus-visible) { outline: none; }
 .msg-badges .icon-btn.star { opacity: 0; }
 .msg-row:hover .msg-badges .icon-btn.star, .msg-badges .icon-btn.star.on { opacity: 1; }
 .msg-badges .icon-btn.star.on { color: var(--star); }
+.msg-badges .important { color: var(--danger); display: inline-flex; }
+.important-banner { display: flex; align-items: center; gap: .45rem; margin: -.5rem 0 1rem; font-size: .84rem; font-weight: 600; color: var(--danger); }
 .msg-hover-actions {
     position: absolute; right: .6rem; top: 50%; transform: translateY(-50%);
     display: none; gap: 2px; padding: 2px; background: var(--surface); border: 1px solid var(--border);

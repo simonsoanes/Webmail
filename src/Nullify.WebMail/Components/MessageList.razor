@@ -145,6 +145,7 @@
                         }
                         <span class="msg-subject">@(string.IsNullOrWhiteSpace(m.Subject) ? "(no subject)" : m.Subject)</span>
                         <span class="msg-badges">
+                            @if (m.IsImportant) { <span class="important" title="Important"><Icon Name="important" Size="13" /></span> }
                             @if (m.IsAnswered) { <span title="Replied"><Icon Name="reply" Size="13" /></span> }
                             @if (m.HasAttachments) { <span title="Has attachments"><Icon Name="paperclip" Size="13" /></span> }
                             <button class="icon-btn star @(m.IsFlagged ? "on" : "")" title="@(m.IsFlagged ? "Unstar" : "Star")"

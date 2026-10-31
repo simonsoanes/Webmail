@@ -147,6 +147,23 @@ window.nullifyApp = (() => {
         permission: 'Notification' in window ? Notification.permission : 'denied',
         ...notifyPrefs()
     });
+    // ---- installing as an app ----------------------------------------------
+    // Chromium browsers offer their install prompt once the page qualifies; keep it for the
+    // Settings button instead of letting the browser show its own banner.
+    let installPrompt = null, installWatcher = null;
+    const installChanged = () => { if (installWatcher) installWatcher.invokeMethodAsync('OnInstallChanged').catch(() => { }); };
+    window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; installChanged(); });
+    window.addEventListener('appinstalled', () => { installPrompt = null; installChanged(); });
+    const installState = () => {
+        const ua = navigator.userAgent;
+        const ios = /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+        const platform = ios ? 'ios'
+            : /Firefox\//.test(ua) ? 'firefox'
+            : /Safari\//.test(ua) && !/Chrome\/|Chromium\/|Edg\//.test(ua) ? 'safari'
+            : 'other';
+        return { installed: installed(), canPrompt: !!installPrompt, platform };
+    };
+
     /** Tags already shown (by this or another window), so a reminder pops up once. */
     const markNotified = (tag) => {
         let seen = {};
@@ -223,6 +240,25 @@ window.nullifyApp = (() => {
 
         async copyText(text) {
             try { await navigator.clipboard.writeText(text); return true; } catch { return false; }
+        },
+
+        install: {
+            state: installState,
+
+            /** Show the browser's install prompt; returns 'accepted', 'dismissed' or 'unavailable'. */
+            async prompt() {
+                const p = installPrompt;
+                if (!p) return 'unavailable';
+                installPrompt = null; // each prompt can be shown once
+                try {
+                    await p.prompt();
+                    const choice = await p.userChoice;
+                    return choice.outcome;
+                } catch { return 'unavailable'; }
+            },
+
+            /** Tell a component (OnInstallChanged) when installing becomes possible or is done. */
+            watch(ref) { installWatcher = ref; },
         },
 
         notifications: {

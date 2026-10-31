@@ -18,7 +18,7 @@ public sealed record FolderInfo(
 public sealed record MessageSummary(
     long Uid, string Subject, string From, string To, string Date, long Size,
     bool IsSeen, bool IsFlagged, bool IsAnswered, bool IsDraft, string MessageId,
-    bool HasAttachments = false)
+    bool HasAttachments = false, bool IsImportant = false)
 {
     /// <summary>IMAP keywords on the message (tags), as stored on the server.</summary>
     public IReadOnlyList<string> Keywords { get; init; } = [];

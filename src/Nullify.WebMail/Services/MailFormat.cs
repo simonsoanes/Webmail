@@ -286,6 +286,15 @@ public static partial class MailFormat
         return s.Trim();
     }
 
+    /// <summary>
+    /// High priority by any of the headers mail apps use: Importance: high (RFC 2156),
+    /// X-Priority 1 or 2 (Outlook and most others), or Priority: urgent (RFC 2156).
+    /// </summary>
+    public static bool IsImportant(string? importance, string? xPriority, string? priority) =>
+        importance?.Trim().StartsWith("high", StringComparison.OrdinalIgnoreCase) == true
+        || xPriority?.TrimStart() is ['1' or '2', ..]
+        || priority?.Trim().StartsWith("urgent", StringComparison.OrdinalIgnoreCase) == true;
+
     /// <summary>True when the HTML would fetch anything from the network.</summary>
     public static bool HasRemoteContent(string html) => RemoteRx().IsMatch(html);
 
