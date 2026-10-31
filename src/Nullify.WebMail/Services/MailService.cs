@@ -379,6 +379,12 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsSe
         sb.Append("Message-ID: <").Append(Guid.NewGuid().ToString("N")).Append('@').Append(domain).AppendLine(">");
         if (!string.IsNullOrWhiteSpace(req.InReplyTo)) sb.Append("In-Reply-To: ").AppendLine(req.InReplyTo.Trim());
         if (!string.IsNullOrWhiteSpace(req.References)) sb.Append("References: ").AppendLine(req.References.Trim());
+        if (req.Important)
+        {
+            // Importance is RFC 2156; X-Priority is what Outlook and most others still read.
+            sb.AppendLine("Importance: high");
+            sb.AppendLine("X-Priority: 1 (Highest)");
+        }
         sb.AppendLine("MIME-Version: 1.0");
         sb.AppendLine("User-Agent: Nullify WebMail");
         sb.Append(bodyEntity ?? BuildBodyEntity(req));
@@ -394,7 +400,7 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsSe
     public static string BuildBodyEntity(SendRequest req)
     {
         var sb = new StringBuilder();
-        var attachments = req.Attachments ?? [];
+        var attachments = (req.Attachments ?? []).Where(a => a.ContentId == null).ToList();
         if (attachments.Count > 0)
         {
             var mixed = $"----=_Mixed_{Guid.NewGuid():N}";
@@ -488,7 +494,7 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsSe
             if (!string.IsNullOrEmpty(req.HtmlBody))
             {
                 sb.Append("--").AppendLine(boundary);
-                AppendTextPart(sb, "text/html", req.HtmlBody);
+                AppendHtml(sb, req);
             }
             if (req.Calendar is { } cal)
             {
@@ -503,6 +509,36 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsSe
             AppendTextPart(sb, "text/plain", req.TextBody ?? "");
         }
     }
+
+    /// <summary>The HTML part, wrapped in multipart/related with any images it shows (RFC 2387).</summary>
+    private static void AppendHtml(StringBuilder sb, SendRequest req)
+    {
+        var images = (req.Attachments ?? []).Where(a => a.ContentId != null).ToList();
+        if (images.Count == 0)
+        {
+            AppendTextPart(sb, "text/html", req.HtmlBody!);
+            return;
+        }
+        var boundary = $"----=_Rel_{Guid.NewGuid():N}";
+        sb.Append("Content-Type: multipart/related; type=\"text/html\"; boundary=\"").Append(boundary).AppendLine("\"");
+        sb.AppendLine();
+        sb.Append("--").AppendLine(boundary);
+        AppendTextPart(sb, "text/html", req.HtmlBody!);
+        foreach (var img in images)
+        {
+            sb.Append("--").AppendLine(boundary);
+            var name = EncodeParam(img.Filename);
+            sb.Append("Content-Type: ").Append(OneLine(img.ContentType)).Append("; name=").AppendLine(name);
+            sb.AppendLine("Content-Transfer-Encoding: base64");
+            sb.Append("Content-ID: <").Append(OneLine(img.ContentId!).Trim('<', '>')).AppendLine(">");
+            sb.Append("Content-Disposition: inline; filename=").AppendLine(name);
+            sb.AppendLine();
+            sb.AppendLine(Convert.ToBase64String(img.Data, Base64FormattingOptions.InsertLineBreaks));
+        }
+        sb.Append("--").Append(boundary).AppendLine("--");
+    }
+
+    private static string OneLine(string value) => value.Replace("\r", "").Replace("\n", "");
 
     private static void AppendTextPart(StringBuilder sb, string type, string text)
     {

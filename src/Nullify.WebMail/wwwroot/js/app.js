@@ -331,14 +331,6 @@ window.nullifyApp = (() => {
             if (el) el.focus();
         },
 
-        /** Focus a textarea with the caret at the very top (replies are written above the quote). */
-        focusStart(el) {
-            if (!el) return;
-            el.focus();
-            el.setSelectionRange(0, 0);
-            el.scrollTop = 0;
-        },
-
         /** Focus an input with the caret after its last character. */
         focusEnd(el) {
             if (!el) return;

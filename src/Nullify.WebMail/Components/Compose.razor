@@ -5,9 +5,9 @@
 @inject CalDavAccountService Dav
 @inject PgpService PgpStore
 @inject PgpBrowser Pgp
-@implements IDisposable
+@implements IAsyncDisposable
 
-<div class="compose-form">
+<div class="compose-form" @ref="formEl">
     <div class="compose-head">
         <h2>@Title</h2>
         <span class="spacer"></span>
@@ -66,19 +66,78 @@
             </div>
         </div>
 
-        <div class="compose-editor">
-            <textarea @ref="bodyInput" class="@(State.ComposeFont == "monospace" ? "mono" : "")"
-                      @bind="body" @bind:event="oninput" placeholder="Write your message…" aria-label="Message body"></textarea>
+        <div class="fmt-toolbar" role="toolbar" aria-label="Formatting" @ref="toolbarEl">
+            <button data-cmd="bold" title="Bold (Ctrl+B)" aria-pressed="false"><Icon Name="bold" Size="17" /></button>
+            <button data-cmd="italic" title="Italic (Ctrl+I)" aria-pressed="false"><Icon Name="italic" Size="17" /></button>
+            <button data-cmd="underline" title="Underline (Ctrl+U)" aria-pressed="false"><Icon Name="underline" Size="17" /></button>
+            <button data-cmd="strikeThrough" title="Strikethrough (Ctrl+Shift+X)" aria-pressed="false"><Icon Name="strikethrough" Size="17" /></button>
+            <span class="fmt-menu">
+                <button data-panel="font" class="fmt-drop" title="Font, size and colour" aria-haspopup="true" aria-expanded="false">
+                    <Icon Name="font" Size="17" /><Icon Name="chevron-down" Size="12" />
+                </button>
+                <div class="fmt-panel" data-for="font" hidden>
+                    <div class="fmt-selects">
+                        <select data-font aria-label="Font">
+                            <option value="" hidden></option>
+                            @foreach (var (name, stack) in Fonts)
+                            {
+                                <option value="@stack" style="font-family:@stack">@name</option>
+                            }
+                        </select>
+                        <select data-size aria-label="Font size">
+                            <option value="" hidden></option>
+                            @foreach (var pt in Sizes)
+                            {
+                                <option value="@pt">@pt</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="fmt-label">Text colour</div>
+                    <div class="fmt-swatches">
+                        @foreach (var c in Palette)
+                        {
+                            <button data-fore="@c" style="background:@c" title="@c" aria-label="Text colour @c"></button>
+                        }
+                    </div>
+                    <label class="fmt-custom"><input type="color" data-fore-custom value="#000000" /> Custom colour…</label>
+                    <div class="fmt-label">Background colour</div>
+                    <div class="fmt-swatches">
+                        @foreach (var c in Palette)
+                        {
+                            <button data-back="@c" style="background:@c" title="@c" aria-label="Background colour @c"></button>
+                        }
+                    </div>
+                    <label class="fmt-custom"><input type="color" data-back-custom value="#ffff00" /> Custom colour…</label>
+                    <button class="fmt-none" data-back=""><span class="fmt-none-box"></span> No colour</button>
+                </div>
+            </span>
+            <span class="fmt-sep"></span>
+            <button data-cmd="insertUnorderedList" title="Bulleted list" aria-pressed="false"><Icon Name="list" Size="17" /></button>
+            <button data-cmd="insertOrderedList" title="Numbered list" aria-pressed="false"><Icon Name="list-ordered" Size="17" /></button>
+            <button data-cmd="outdent" title="Decrease indent"><Icon Name="outdent" Size="17" /></button>
+            <button data-cmd="indent" title="Increase indent"><Icon Name="indent" Size="17" /></button>
+            <span class="fmt-sep"></span>
+            <button data-cmd="createLink" title="Link (Ctrl+K)"><Icon Name="link" Size="17" /></button>
+            <button data-cmd="insertImage" title="Insert photo"><Icon Name="image" Size="17" /></button>
+            <button data-cmd="removeFormat" title="Clear formatting"><Icon Name="eraser" Size="17" /></button>
+            <span class="spacer"></span>
+            <button class="fmt-important @(important ? "on" : "")" @onclick="() => important = !important" aria-pressed="@important"
+                    title="Mark as important"><Icon Name="important" Size="17" /><span class="hide-sm">Important</span></button>
         </div>
 
-        @if (attachments.Count > 0)
+        <div class="compose-editor">
+            <div @ref="editorEl" class="compose-body @(State.ComposeFont == "monospace" ? "mono" : "")" contenteditable="true"
+                 role="textbox" aria-multiline="true" aria-label="Message body" spellcheck="true"></div>
+        </div>
+
+        @if (attachments.Any(a => a.ContentId == null))
         {
             <div class="compose-attachments">
-                @foreach (var att in attachments)
+                @foreach (var att in attachments.Where(a => a.ContentId == null))
                 {
                     var a = att;
                     <span class="chip" title="@a.Filename">
-                        <Icon Name="paperclip" Size="13" />
+                        <Icon Name="@(a.ContentType.StartsWith("image/") ? "image" : "paperclip")" Size="13" />
                         <span>@a.Filename</span>
                         <span class="muted">@MailFormat.Size(a.Data.LongLength)</span>
                         <button @onclick="() => attachments.Remove(a)" title="Remove"><Icon Name="x" Size="12" /></button>
@@ -126,7 +185,7 @@
                             title="Encrypt for the recipients' OpenPGP keys"><Icon Name="lock" Size="14" /> Encrypt</button>
                 </span>
             }
-            <span class="hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> to send</span>
+            <span class="hint">Drop files to attach · <kbd>Ctrl</kbd> + <kbd>Enter</kbd> to send</span>
             <span class="spacer"></span>
             <button class="btn ghost small" @onclick="SaveDraft" disabled="@sending">Save draft</button>
             <button class="icon-btn" @onclick="Discard" title="Discard"><Icon Name="trash" /></button>
@@ -142,16 +201,43 @@
 @code {
     private const long MaxAttachmentBytes = 25 * 1024 * 1024;
 
+    private static readonly (string Name, string Stack)[] Fonts =
+    [
+        ("Sans serif", "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"),
+        ("Arial", "Arial,Helvetica,sans-serif"),
+        ("Calibri", "Calibri,Carlito,sans-serif"),
+        ("Georgia", "Georgia,serif"),
+        ("Segoe UI", "'Segoe UI',sans-serif"),
+        ("Tahoma", "Tahoma,Geneva,sans-serif"),
+        ("Times New Roman", "'Times New Roman',Times,serif"),
+        ("Trebuchet MS", "'Trebuchet MS',sans-serif"),
+        ("Verdana", "Verdana,Geneva,sans-serif"),
+        ("Monospace", "Consolas,'Cascadia Mono','Courier New',monospace"),
+    ];
+
+    private static readonly int[] Sizes = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72];
+
+    private static readonly string[] Palette =
+    [
+        "#000000", "#434343", "#666666", "#999999", "#cccccc", "#e0e0e0", "#f3f3f3", "#ffffff",
+        "#ff0000", "#ff9900", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#9900ff", "#ff00ff",
+        "#e6b8af", "#f9cb9c", "#ffe599", "#b6d7a8", "#a2c4c9", "#9fc5e8", "#b4a7d6", "#d5a6bd",
+        "#dd7e6b", "#f6b26b", "#ffd966", "#93c47d", "#76a5af", "#6fa8dc", "#8e7cc3", "#c27ba0",
+        "#a61c00", "#b45f06", "#bf9000", "#38761d", "#134f5c", "#0b5394", "#351c75", "#741b47",
+        "#5b0f00", "#783f04", "#7f6000", "#274e13", "#0c343d", "#073763", "#20124d", "#4c1130",
+    ];
+
     private string from = "";
     private string to = "", cc = "", bcc = "", subject = "", body = "";
-    private string initialBody = "";
-    private bool showCc, showBcc;
+    private bool showCc, showBcc, important;
     private string? inReplyTo, references;
     private readonly List<OutgoingAttachment> attachments = new();
     private string? error;
     private bool sending, attaching, loading = true;
     private RecipientInput? toInput;
-    private ElementReference bodyInput;
+    private ElementReference formEl, toolbarEl, editorEl;
+    private IJSObjectReference? editor;
+    private DotNetObjectReference<Compose>? selfRef;
     private IReadOnlyList<RecipientCandidate>? candidates;
     private bool candidatesRequested;
     private bool focusPending;
@@ -268,12 +354,11 @@
         }
         else
         {
-            body = signature;
+            body = TextToHtml(signature);
             to = State.ComposeTo ?? "";
             State.ComposeTo = null;
         }
 
-        initialBody = body;
         await InitPgp();
         loading = false;
         focusPending = true;
@@ -285,9 +370,17 @@
         focusPending = false;
         try
         {
-            // Replies start in the body; new messages and forwards need recipients first.
+            selfRef = DotNetObjectReference.Create(this);
+            var module = await JS.InvokeAsync<IJSObjectReference>("import", "./js/compose.js");
+            editor = await module.InvokeAsync<IJSObjectReference>("init", formEl, editorEl, toolbarEl, body,
+                State.ComposeFont == "monospace", selfRef);
+            await module.DisposeAsync();
+        }
+        catch (JSDisconnectedException) { return; }
+        try
+        {
             // Replies (and messages addressed from Contacts) start in the body; others need recipients first.
-            if (State.ComposeMode is ComposeMode.Reply or ComposeMode.ReplyAll) await JS.InvokeVoidAsync("nullifyApp.focusStart", bodyInput);
+            if (State.ComposeMode is ComposeMode.Reply or ComposeMode.ReplyAll) await editor.InvokeVoidAsync("focus", true);
             else if (to.Length > 0) await JS.InvokeVoidAsync("nullifyApp.focus", "#compose-subject");
             else if (toInput != null) await toInput.FocusAsync();
         }
@@ -307,9 +400,9 @@
         if (State.ComposeMode == ComposeMode.Forward)
         {
             subject = HasPrefix(origSubject, "fwd:", "fw:") ? origSubject : "Fwd: " + origSubject;
-            body = signature + "\n\n---------- Forwarded message ----------\n" +
+            body = TextToHtml(signature + "\n\n---------- Forwarded message ----------\n" +
                    $"From: {H("From")}\nDate: {date}\nSubject: {origSubject}\nTo: {H("To")}\n" +
-                   (H("Cc").Length > 0 ? $"Cc: {H("Cc")}\n" : "") + "\n" + text;
+                   (H("Cc").Length > 0 ? $"Cc: {H("Cc")}\n" : "") + "\n" + text);
             await ForwardAttachments(msg, uid);
             return;
         }
@@ -348,8 +441,33 @@
             references = (H("References") + " " + messageId).Trim();
         }
 
-        var quoted = string.Join("\n", text.Split('\n').Select(l => l.StartsWith('>') ? ">" + l : "> " + l));
-        body = signature + $"\n\nOn {date}, {sender.Display} wrote:\n{quoted}";
+        body = TextToHtml(signature + $"\n\nOn {date}, {sender.Display} wrote:") +
+               $"<blockquote type=\"cite\" style=\"{QuoteStyle}\">{TextToHtml(text)}</blockquote>";
+    }
+
+    private const string QuoteStyle = "margin:0 0 0 .8ex;border-left:2px solid #ccc;padding-left:1ex";
+
+    /// <summary>Plain text as editor lines: runs of spaces survive, and lines the original quoted become quotes.</summary>
+    private static string TextToHtml(string text)
+    {
+        var sb = new System.Text.StringBuilder();
+        var lines = text.Replace("\r\n", "\n").Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].StartsWith('>'))
+            {
+                var run = new List<string>();
+                for (; i < lines.Length && lines[i].StartsWith('>'); i++)
+                    run.Add(lines[i].StartsWith("> ") ? lines[i][2..] : lines[i][1..]);
+                i--;
+                sb.Append($"<blockquote type=\"cite\" style=\"{QuoteStyle}\">").Append(TextToHtml(string.Join("\n", run))).Append("</blockquote>");
+                continue;
+            }
+            var line = System.Net.WebUtility.HtmlEncode(lines[i]).Replace("\t", "    ");
+            line = System.Text.RegularExpressions.Regex.Replace(line, "(?<=^| ) ", "&nbsp;");
+            sb.Append("<div>").Append(line.Length == 0 ? "<br>" : line).Append("</div>");
+        }
+        return sb.ToString();
     }
 
     private async Task ForwardAttachments(MessageContent msg, long uid)
@@ -392,6 +510,48 @@
     private static bool HasPrefix(string s, params string[] prefixes) =>
         prefixes.Any(p => s.TrimStart().StartsWith(p, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>A file pasted, dropped or picked in the editor, waiting in the page.</summary>
+    public sealed record OfferedFile(string Id, string Name, string Type, long Size, string? Cid);
+
+    /// <summary>Take files from the page: attachments, or (with a Content-ID) photos already shown in the body.</summary>
+    [JSInvokable]
+    public async Task OnFilesOffered(OfferedFile[] files)
+    {
+        if (editor == null) return;
+        attaching = true;
+        error = null;
+        StateHasChanged();
+        try
+        {
+            foreach (var f in files)
+            {
+                var used = attachments.Sum(a => a.Data.LongLength);
+                if (used + f.Size > MaxAttachmentBytes)
+                {
+                    error = $"\"{f.Name}\" would exceed the {MailFormat.Size(MaxAttachmentBytes)} attachment limit.";
+                    if (f.Cid != null) await editor.InvokeVoidAsync("dropImage", f.Cid);
+                    continue;
+                }
+                var data = await editor.InvokeAsync<IJSStreamReference>("take", f.Id);
+                await using var stream = await data.OpenReadStreamAsync(MaxAttachmentBytes);
+                using var ms = new MemoryStream();
+                await stream.CopyToAsync(ms);
+                attachments.Add(new OutgoingAttachment(f.Name,
+                    string.IsNullOrEmpty(f.Type) ? "application/octet-stream" : f.Type, ms.ToArray(), f.Cid));
+            }
+        }
+        catch (JSDisconnectedException) { }
+        catch (Exception ex)
+        {
+            error = $"Could not add file: {ex.Message}";
+        }
+        finally
+        {
+            attaching = false;
+            StateHasChanged();
+        }
+    }
+
     private async Task OnFiles(InputFileChangeEventArgs e)
     {
         attaching = true;
@@ -425,12 +585,30 @@
     private static List<string> SplitRecipients(string value) =>
         MailFormat.ParseAddressList(value).Select(a => a.ToString()).ToList();
 
-    private SendRequest BuildRequest() => new(
-        from, SplitRecipients(to),
-        showCc ? SplitRecipients(cc) : null,
-        showBcc ? SplitRecipients(bcc) : null,
-        subject, body, null, null, false, false, null,
-        inReplyTo, references, attachments.ToList());
+    private sealed record EditorContent(string Html, string Text, bool Rich, string[] Cids);
+
+    /// <summary>The message as written. Bodies with no formatting or photos go as plain text alone.</summary>
+    private async Task<SendRequest> BuildRequestAsync()
+    {
+        var content = new EditorContent("", "", false, []);
+        if (editor != null)
+        {
+            var data = await editor.InvokeAsync<IJSStreamReference>("content");
+            await using var stream = await data.OpenReadStreamAsync(MaxAttachmentBytes);
+            content = await System.Text.Json.JsonSerializer.DeserializeAsync<EditorContent>(stream,
+                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)) ?? content;
+        }
+        // Photos deleted from the body are left out.
+        var shown = content.Cids.ToHashSet();
+        return new SendRequest(
+            from, SplitRecipients(to),
+            showCc ? SplitRecipients(cc) : null,
+            showBcc ? SplitRecipients(bcc) : null,
+            subject, content.Text, content.Rich ? content.Html : null, null, false, false, null,
+            inReplyTo, references,
+            attachments.Where(a => a.ContentId == null || content.Rich && shown.Contains(a.ContentId)).ToList(),
+            Important: important);
+    }
 
     private async Task Send()
     {
@@ -474,7 +652,7 @@
         await InvokeAsync(StateHasChanged);
         try
         {
-            var request = BuildRequest();
+            var request = await BuildRequestAsync();
             await Api.SendAsync(request, await ProtectAsync(request));
             if (State.ComposeMode is ComposeMode.Reply or ComposeMode.ReplyAll &&
                 State.ComposeSourceFolder != null && State.ComposeSourceUid is { } uid)
@@ -511,7 +689,7 @@
     {
         try
         {
-            var folder = await Api.SaveDraftAsync(BuildRequest());
+            var folder = await Api.SaveDraftAsync(await BuildRequestAsync());
             if (folder == null)
             {
                 error = "This mailbox has no Drafts folder.";
@@ -528,19 +706,20 @@
         }
     }
 
-    private bool IsDirty =>
-        body != initialBody || to.Length > 0 && State.ComposeMode is ComposeMode.New or ComposeMode.Forward
-        || attachments.Count > 0 && State.ComposeMode != ComposeMode.Forward;
+    private async Task<bool> IsDirtyAsync() =>
+        to.Length > 0 && State.ComposeMode is ComposeMode.New or ComposeMode.Forward
+        || attachments.Count > 0 && State.ComposeMode != ComposeMode.Forward
+        || editor != null && await editor.InvokeAsync<bool>("isDirty");
 
     private async Task Discard()
     {
-        if (IsDirty && !await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard this message?")) return;
+        if (await IsDirtyAsync() && !await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard this message?")) return;
         CloseNow();
     }
 
     private async Task Close()
     {
-        if (IsDirty && !await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard this message?")) return;
+        if (await IsDirtyAsync() && !await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard this message?")) return;
         CloseNow();
     }
 
@@ -552,8 +731,18 @@
         State.NotifyStateChanged();
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         if (State.SendHandler == Send) State.SendHandler = null;
+        if (editor != null)
+        {
+            try
+            {
+                await editor.InvokeVoidAsync("dispose");
+                await editor.DisposeAsync();
+            }
+            catch (JSDisconnectedException) { }
+        }
+        selfRef?.Dispose();
     }
 }

@@ -105,6 +105,43 @@ public class MimeTests
     }
 
     [TestMethod]
+    public void InlinePhotos_GoInMultipartRelatedBesideTheHtml()
+    {
+        var png = new byte[] { 0x89, 0x50, 0x4E, 0x47, 1, 2, 3 };
+        var req = new SendRequest("me@example.test", ["bob@example.org"], null, null, "Photo", "Look [photo.png]",
+            """<div>Look <img src="cid:img1.abc@webmail"></div>""", null, false, false, null,
+            Attachments:
+            [
+                new OutgoingAttachment("photo.png", "image/png", png, "img1.abc@webmail"),
+                new OutgoingAttachment("notes.txt", "text/plain", Encoding.UTF8.GetBytes("attached")),
+            ],
+            Important: true);
+
+        var mime = MailService.BuildMimeMessage(req, "fallback@example.test");
+        StringAssert.Contains(mime, "Importance: high");
+        StringAssert.Contains(mime, "X-Priority: 1 (Highest)");
+        StringAssert.Contains(mime, "multipart/related");
+        StringAssert.Contains(mime, "Content-ID: <img1.abc@webmail>");
+
+        var parsed = MimeParser.Parse(Encoding.ASCII.GetBytes(mime));
+        StringAssert.Contains(parsed.HtmlBody, "cid:img1.abc@webmail");
+        Assert.AreEqual("Look [photo.png]", parsed.TextBody?.TrimEnd());
+        var photo = parsed.Attachments.Single(a => a.Filename == "photo.png");
+        Assert.AreEqual("img1.abc@webmail", photo.ContentId?.Trim('<', '>'));
+        Assert.IsTrue(photo.IsInline);
+        Assert.IsTrue(parsed.Attachments.Any(a => a.Filename == "notes.txt" && !a.IsInline));
+    }
+
+    [TestMethod]
+    public void UnimportantMessages_CarryNoPriorityHeaders()
+    {
+        var req = new SendRequest("me@example.test", ["bob@example.org"], null, null, "Hi", "Hello", null, null, false, false, null);
+        var mime = MailService.BuildMimeMessage(req, "fallback@example.test");
+        Assert.IsFalse(mime.Contains("Importance:") || mime.Contains("X-Priority:"));
+        StringAssert.StartsWith(mime[mime.IndexOf("Content-Type:")..], "Content-Type: text/plain");
+    }
+
+    [TestMethod]
     public void UidSet_CompactsRuns() =>
         Assert.AreEqual("1:3,7,9:10", ImapSession.UidSet([3, 1, 2, 7, 10, 9]));
 

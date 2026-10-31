@@ -2,7 +2,7 @@
 
 A self-hosted **webmail client** for your existing IMAP/SMTP server, with calendar, contacts, files, server-side filters and **OpenPGP**. It is built on .NET 10 (Blazor Server) and SQLite (or PostgreSQL), and is designed to run in Docker on Linux behind a reverse proxy such as Caddy.
 
-- **Mail** over IMAP and SMTP: folders, search, flags, move and archive, attachments, HTML and plain-text compose, reply and forward
+- **Mail** over IMAP and SMTP: folders, search, flags, move and archive, attachments, rich-text compose (fonts, colours, lists, inline photos) that stays plain text when unformatted, paste and drag-and-drop attachments, important flag, reply and forward
 - **Safe message display**: HTML mail is rendered in a sandboxed iframe, with remote images blocked until you allow them
 - **OpenPGP** in the browser: key generation, import and export, encrypt, decrypt, sign and verify, with optional unlock by a security key (WebAuthn PRF). The OpenPGP cryptography runs in the browser, and private keys are only stored in protected form.
 - **Calendar and contacts** from any CalDAV/CardDAV server, with recipient autocomplete from your address books. Month, week and day views; drag across days or times to create an event there, and set a reminder on it. Calendars shared with you and those of people who made you their delegate can be turned on and off, and you can subscribe to published internet calendars (webcal/.ics) and public CalDAV calendars

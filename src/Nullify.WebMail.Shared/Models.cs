@@ -60,7 +60,8 @@ public sealed record SenderAuthCheck(string Method, string Result, string? Domai
 /// <summary>An attachment of a received message; <see cref="PartId"/> is the MIME part path (e.g. "2.1").</summary>
 public sealed record AttachmentInfo(string PartId, string Filename, string ContentType, long Size, string? ContentId, bool IsInline);
 
-public sealed record OutgoingAttachment(string Filename, string ContentType, byte[] Data);
+/// <param name="ContentId">Set for an image shown in the HTML body (referenced as cid:…) rather than attached.</param>
+public sealed record OutgoingAttachment(string Filename, string ContentType, byte[] Data, string? ContentId = null);
 
 public sealed record SendRequest(
     string From, IReadOnlyList<string> To, IReadOnlyList<string>? Cc, IReadOnlyList<string>? Bcc,
@@ -68,7 +69,8 @@ public sealed record SendRequest(
     bool PgpSign, bool PgpEncrypt, string? PgpKeyId,
     string? InReplyTo = null, string? References = null,
     IReadOnlyList<OutgoingAttachment>? Attachments = null,
-    CalendarPart? Calendar = null);
+    CalendarPart? Calendar = null,
+    bool Important = false);
 
 /// <summary>An iTIP object sent as a text/calendar alternative to the body (iMIP, RFC 6047).</summary>
 public sealed record CalendarPart(string Method, string Ics);
