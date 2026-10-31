@@ -29,6 +29,8 @@ docker compose up -d --build
 
 The compose file runs the app and [Caddy](https://caddyserver.com) with automatic HTTPS ([Caddyfile](Caddyfile)). The app port is not published; only Caddy listens on 80/443.
 
+Released versions are also published for amd64 and arm64 as `ghcr.io/simonsoanes/webmail` (`:latest`, `:0.1`, `:0.1.0`, …); set `image:` in the compose file to one of them and drop `--build` to skip building.
+
 Open `https://<WEBMAIL_HOST>/`. On first start, the **setup page** asks for your IMAP (and optionally SMTP and Sieve) server and signs you in against it. That account becomes the first administrator, and the server becomes the mapping for your email domain. **Complete setup before the site is reachable by anyone else**: until then, whoever opens the page first becomes the administrator.
 
 Sessions live in the app's memory, so restarting or updating the container signs everyone out. For the same reason, run a single instance, or use sticky sessions if you put several behind a load balancer.

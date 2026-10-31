@@ -7,7 +7,9 @@
 ARG DOTNET_VERSION=10.0
 ARG NODE_VERSION=22
 
-FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION} AS build
+# The publish output is portable IL (no app host), so it is built on the builder's own platform and only
+# the runtime stage differs per architecture; multi-arch builds then need no emulated SDK.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION} AS build
 ARG VERSION=0.0.0
 WORKDIR /src
 COPY Nullify.WebMail.slnx ./
