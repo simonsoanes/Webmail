@@ -100,7 +100,7 @@
 
     @if (status == Status.Ready && listing != null)
     {
-        <div class="docs-table-wrap">
+        <div class="docs-table-wrap" @oncontextmenu="OpenFolderContext" @oncontextmenu:preventDefault="true">
             <table class="docs-table">
                 <thead>
                     <tr>
@@ -141,7 +141,8 @@
                             </tr>
                             continue;
                         }
-                        <tr class="@(justUploaded.Contains(it.Name) ? "just-added" : null)" data-name="@it.Name">
+                        <tr class="@(justUploaded.Contains(it.Name) ? "just-added" : null) @(ctxItem?.Path == it.Path ? "context" : null)" data-name="@it.Name"
+                            @oncontextmenu="e => OpenContext(e, it)" @oncontextmenu:preventDefault="true" @oncontextmenu:stopPropagation="true">
                             <td class="col-name">
                                 @if (it.IsFolder)
                                 {
@@ -186,10 +187,39 @@
     @if (status == Status.Ready)
     {
         <div class="drop-overlay" aria-hidden="true">
-            <div class="drop-hint"><Icon Name="upload" Size="28" /><span>Drop files to upload to @(Crumbs().Select(c => c.Name).LastOrDefault() ?? current?.Name ?? "Documents")</span></div>
+            <div class="drop-hint"><Icon Name="upload" Size="28" /><span>Drop files to upload to @FolderName</span></div>
         </div>
     }
 </div>
+
+@if (ctxAt is { } at)
+{
+    <ContextMenu X="at.X" Y="at.Y" OnClose="CloseContext">
+        @if (ctxItem is { } ci)
+        {
+            <div class="menu-title">@ci.Name</div>
+            @if (ci.IsFolder)
+            {
+                <button class="menu-item" @onclick="() => FromContext(() => Open(ci.Path))"><Icon Name="folder" Size="16" /> <span>Open</span></button>
+            }
+            else
+            {
+                <button class="menu-item" @onclick="() => FromContext(() => Download(ci))"><Icon Name="download" Size="16" /> <span>Download</span></button>
+            }
+            <button class="menu-item" @onclick="() => FromContext(() => CopyName(ci))"><Icon Name="copy" Size="16" /> <span>Copy name</span></button>
+            <div class="menu-sep"></div>
+            <button class="menu-item" @onclick="() => FromContext(() => { StartRename(ci); return Task.CompletedTask; })"><Icon Name="pen" Size="16" /> <span>Rename</span></button>
+            <div class="menu-sep"></div>
+            <button class="menu-item danger" @onclick="() => FromContext(() => Delete(ci))"><Icon Name="trash" Size="16" /> <span>@(ci.IsFolder ? "Delete folder" : "Delete")</span></button>
+        }
+        else
+        {
+            <div class="menu-title">@FolderName</div>
+            <button class="menu-item" @onclick="() => FromContext(() => { StartNewFolder(); return Task.CompletedTask; })"><Icon Name="folder-plus" Size="16" /> <span>New folder</span></button>
+            <button class="menu-item" @onclick="() => FromContext(Refresh)" disabled="@loading"><Icon Name="refresh" Size="16" /> <span>Refresh</span></button>
+        }
+    </ContextMenu>
+}
 
 @code {
     private enum Status { Loading, Servers, Ready, NotConfigured, NeedsReentry, Error }
@@ -213,6 +243,10 @@
     private string nameValue = "";
     private ElementReference nameInput;
     private bool focusName;
+
+    // The right-click menu: where, and for which item (none = the open folder).
+    private (double X, double Y)? ctxAt;
+    private DavItem? ctxItem;
 
     private ElementReference shell;
     private bool uploading;
@@ -381,6 +415,43 @@
     private string DownloadUrl(DavItem item) =>
         $"api/files/download?path={Uri.EscapeDataString(item.Path)}"
         + (current?.Id is { } id ? $"&server={Uri.EscapeDataString(id)}" : "");
+
+    private string FolderName => Crumbs().Select(c => c.Name).LastOrDefault() ?? current?.Name ?? "Documents";
+
+    // ---- right-click menu ----
+
+    private void OpenContext(MouseEventArgs e, DavItem item)
+    {
+        ctxItem = item;
+        ctxAt = (e.ClientX, e.ClientY);
+    }
+
+    /// <summary>Right-click on the empty part of the listing: actions for the open folder itself.</summary>
+    private void OpenFolderContext(MouseEventArgs e)
+    {
+        ctxItem = null;
+        ctxAt = (e.ClientX, e.ClientY);
+    }
+
+    private void CloseContext()
+    {
+        ctxAt = null;
+        ctxItem = null;
+    }
+
+    private async Task FromContext(Func<Task> action)
+    {
+        CloseContext();
+        await action();
+    }
+
+    private Task Download(DavItem item) => JS.InvokeVoidAsync("nullifyApp.download", DownloadUrl(item)).AsTask();
+
+    private async Task CopyName(DavItem item)
+    {
+        if (await JS.InvokeAsync<bool>("nullifyApp.copyText", item.Name)) State.ShowToast("Name copied");
+        else State.ShowToast("Couldn't copy to the clipboard", isError: true);
+    }
 
     // ---- folders, rename, delete ----
 

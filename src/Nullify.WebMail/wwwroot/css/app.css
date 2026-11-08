@@ -1299,6 +1299,9 @@ img.avatar { object-fit: cover; background: var(--surface-3); }
 .sort-mark { color: var(--accent); margin-left: .15rem; }
 .docs-table td { padding: 0 .75rem; height: 44px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .docs-table tbody tr:hover { background: var(--surface-2); }
+.docs-table tbody tr.context td { box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent); }
+.docs-table tbody tr.context td:first-child { box-shadow: inset 1px 1px 0 var(--accent), inset 0 -1px 0 var(--accent); }
+.docs-table tbody tr.context td:last-child { box-shadow: inset -1px 1px 0 var(--accent), inset 0 -1px 0 var(--accent); }
 .docs-table th:first-child button, .docs-table td:first-child { padding-left: 1.25rem; }
 .docs-table .col-name { width: 100%; max-width: 0; }
 .docs-table .col-mod, .docs-table .col-size { color: var(--muted); font-size: .82rem; font-variant-numeric: tabular-nums; }
