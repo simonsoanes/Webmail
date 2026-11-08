@@ -117,6 +117,17 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsSe
         Keywords = e.Keywords,
     };
 
+    /// <summary>One message's list entry (flags, tags), plus the folder's tag list; null when it's gone.</summary>
+    public Task<(MessageSummary? Message, IReadOnlyList<string> Keywords, bool CanCreateKeywords)> GetSummaryAsync(
+        CredentialInfo cred, string folder, long uid) =>
+        WithSession<(MessageSummary?, IReadOnlyList<string>, bool)>(cred, async s =>
+        {
+            var sel = await s.SelectFolderAsync(folder);
+            var envs = await s.FetchEnvelopesByUidAsync([uid]);
+            var found = envs.FirstOrDefault(e => e.Uid == uid);
+            return (found == null ? null : ToSummary(found), sel.Keywords ?? [], sel.CanCreateKeywords);
+        });
+
     public Task<MessageContent> GetMessageAsync(CredentialInfo cred, string folder, long uid) =>
         WithSession(cred, async s =>
         {

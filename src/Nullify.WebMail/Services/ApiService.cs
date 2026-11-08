@@ -54,6 +54,9 @@ public class ApiService(
     public async Task<MessagePage?> GetMessagesAsync(string folderName, int page = 0, int pageSize = 50) =>
         await mail.GetMessagesAsync(Cred, folderName, page, pageSize);
 
+    public Task<(MessageSummary? Message, IReadOnlyList<string> Keywords, bool CanCreateKeywords)> GetSummaryAsync(string folderName, long uid) =>
+        mail.GetSummaryAsync(Cred, folderName, uid);
+
     public async Task<MessageContent?> GetMessageAsync(string folderName, long uid) =>
         await mail.GetMessageAsync(Cred, folderName, uid);
 

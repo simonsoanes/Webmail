@@ -2,6 +2,7 @@
 // and sizing of the sandboxed message frame. No third-party code.
 window.nullifyApp = (() => {
     let dotnet = null;
+    let openerRefresh = 0;
 
     // ---- resizable panes ----------------------------------------------------
     // Widths live in CSS variables on <html> and in localStorage, so they survive
@@ -237,6 +238,34 @@ window.nullifyApp = (() => {
             if (swListener) navigator.serviceWorker.removeEventListener('message', swListener);
             keyHandler = null; events = null; dotnet = null; swListener = null;
         },
+
+        /** Open one message in its own window (one window per message; reopening focuses it). */
+        openMessage(folder, uid) {
+            const url = new URL('./', document.baseURI);
+            url.searchParams.set('message', String(uid));
+            url.searchParams.set('folder', folder);
+            const w = window.open(url.href, `nullify-message-${uid}-${folder}`, 'popup,width=960,height=800');
+            if (w) w.focus();
+            return !!w;
+        },
+
+        /** In a message window: the browser's IANA time zone, without the main window's wiring. */
+        timeZone() {
+            try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { return ''; }
+        },
+
+        /** In a message window: tell the main window its list may be out of date. */
+        notifyOpener() {
+            try { if (window.opener && !window.opener.closed) window.opener.nullifyApp?.messageWindowChanged(); } catch { }
+        },
+
+        /** In the main window: a message window changed something; refresh once things settle. */
+        messageWindowChanged() {
+            clearTimeout(openerRefresh);
+            openerRefresh = setTimeout(() => dotnet && dotnet.invokeMethodAsync('OnMessageWindowChanged'), 1200);
+        },
+
+        closeWindow() { window.close(); },
 
         async copyText(text) {
             try { await navigator.clipboard.writeText(text); return true; } catch { return false; }

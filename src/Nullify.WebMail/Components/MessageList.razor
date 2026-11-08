@@ -2,6 +2,7 @@
 @inject ApiService Api
 @inject AppState State
 @inject MailActions Actions
+@inject IJSRuntime JS
 @implements IDisposable
 
 @{
@@ -122,6 +123,7 @@
             <div class="msg-row @(State.SelectedMessageUid == m.Uid ? "active" : "") @(m.IsSeen ? "" : "unread") @(isChecked ? "checked" : "") @(ctxAt != null && ctxUids.Contains(m.Uid) ? "context" : "")"
                  draggable="true" @ondragstart="() => DragStart(m.Uid)"
                  @onclick="e => RowClick(e, m.Uid)"
+                 @ondblclick="e => OpenWindow(e, m.Uid)" title="Double-click to open in a new window"
                  @oncontextmenu="e => OpenContext(e, m.Uid)" @oncontextmenu:preventDefault="true">
                 <div class="lead" @onclick:stopPropagation="true">
                     <div class="avatar" style="--hue:@MailFormat.AvatarHue(who)">@MailFormat.Initials(who)</div>
@@ -366,6 +368,14 @@
         anchorUid = uid;
         State.CheckedUids.Clear();
         Open(uid);
+    }
+
+    /// <summary>Double-click opens the message in a window of its own.</summary>
+    private async Task OpenWindow(MouseEventArgs e, long uid)
+    {
+        if (e.ShiftKey || e.CtrlKey || e.MetaKey || State.SelectedFolder is not { } folder) return;
+        if (!await JS.InvokeAsync<bool>("nullifyApp.openMessage", folder, uid))
+            State.ShowToast("Your browser blocked the new window — allow pop-ups for this site.", isError: true);
     }
 
     private void ToggleCheck(long uid)

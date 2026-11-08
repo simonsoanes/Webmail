@@ -1,0 +1,162 @@
+@using Nullify.WebMail.Services
+@inject ApiService Api
+@inject AppState State
+@inject IJSRuntime JS
+@inject BrandingService Branding
+@implements IDisposable
+
+@* One message in a window of its own, opened by double-clicking it in the list. It has its own
+   circuit, so it loads just what the reading pane and replying need, and tells the main window
+   (its opener) when something changed so the list there catches up. *@
+
+<PageTitle>@(summary?.Subject is { Length: > 0 } s ? s : "Message") · @State.BrandTitle WebMail</PageTitle>
+
+<section class="detail-panel mobile-visible message-window">
+    @if (!ready)
+    {
+        <div class="boot"><span class="spinner"></span> Loading…</div>
+    }
+    else if (State.ShowCompose)
+    {
+        <Compose @key="composeKey" />
+    }
+    else if (State.SelectedMessageUid != null)
+    {
+        <MessagePreview />
+    }
+    else
+    {
+        <div class="empty-state">
+            <div class="empty-icon"><Icon Name="mail" Size="26" /></div>
+            <h3>@(gone ? "This message is no longer here" : "Message closed")</h3>
+            <p>@(gone ? "It may have been moved or deleted." : "You can close this window.")</p>
+            <button class="btn small" @onclick="CloseWindow">Close window</button>
+        </div>
+    }
+</section>
+
+<div class="toasts" role="status" aria-live="polite">
+    @foreach (var toast in State.Toasts)
+    {
+        <div class="toast @(toast.IsError ? "error" : "")">
+            <span>@toast.Message</span>
+            <span class="spacer"></span>
+            <button @onclick="() => State.DismissToast(toast.Id)" title="Dismiss"><Icon Name="x" Size="15" /></button>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Folder { get; set; } = "";
+    [Parameter, EditorRequired] public long Uid { get; set; }
+
+    private bool ready;
+    private bool gone;
+    private bool closing;
+    private int composeKey;
+    private MessageSummary? summary;
+    private IReadOnlyList<MessageSummary>? seenMessages;
+    private int seenFoldersVersion;
+
+    protected override async Task OnInitializedAsync()
+    {
+        State.ActiveTab = "mail";
+        State.SelectedFolder = Folder;
+        State.SelectedMessageUid = Uid;
+        State.StateChanged += OnStateChanged;
+        State.ComposeOpened += OnComposeOpened;
+
+        try
+        {
+            var (message, keywords, canCreate) = await Api.GetSummaryAsync(Folder, Uid);
+            summary = message;
+            State.FolderTags = keywords;
+            State.CanCreateTags = canCreate;
+            State.CurrentMessages = message != null ? [message] : [];
+            State.CurrentTotal = State.CurrentMessages.Count;
+            if (message == null)
+            {
+                gone = true;
+                State.SelectedMessageUid = null;
+            }
+        }
+        catch { /* the reading pane shows its own load error */ }
+
+        // Archive, Move and Reply need the folder list, signature and senders, as in the main window.
+        try { State.Folders = await Api.GetFoldersAsync(); } catch { }
+        try
+        {
+            foreach (var p in await Api.GetPreferencesAsync())
+            {
+                if (p.Key == "compose.signature") State.Signature = p.Value ?? "";
+                if (p.Key == "compose.font") State.ComposeFont = p.Value ?? "sans-serif";
+            }
+        }
+        catch { }
+        try { State.Senders = await Api.GetSendersAsync(); } catch { }
+        try { State.BrandTitle = await Branding.TitleAsync(); } catch { }
+
+        seenMessages = State.CurrentMessages;
+        seenFoldersVersion = State.FoldersVersion;
+        ready = true;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try
+        {
+            var tz = await JS.InvokeAsync<string>("nullifyApp.timeZone");
+            if (!string.IsNullOrEmpty(tz) && TimeZoneInfo.TryFindSystemTimeZoneById(tz, out var zone))
+            {
+                State.TimeZone = zone;
+                StateHasChanged();
+            }
+            // Opening it marks it read; let the list show that.
+            await JS.InvokeVoidAsync("nullifyApp.notifyOpener");
+        }
+        catch (JSDisconnectedException) { }
+    }
+
+    private void OnComposeOpened() => composeKey++;
+
+    private async void OnStateChanged() => await InvokeAsync(async () =>
+    {
+        if (!ready) return;
+        summary = State.CurrentMessages.FirstOrDefault(m => m.Uid == Uid) ?? summary;
+
+        // Flags, tags, a move or delete, or a reply sent from here: the main window's list is stale.
+        var changed = !ReferenceEquals(State.CurrentMessages, seenMessages) || State.FoldersVersion != seenFoldersVersion;
+        var settled = State.FoldersVersion != seenFoldersVersion;
+        seenMessages = State.CurrentMessages;
+        seenFoldersVersion = State.FoldersVersion;
+        if (changed) await NotifyOpener();
+
+        // Moved, archived or deleted from here, once the server has done it: nothing left to show.
+        if (settled && !gone && State.SelectedMessageUid == null && !State.ShowCompose)
+        {
+            await CloseWindow();
+            return;
+        }
+        StateHasChanged();
+    });
+
+    private async Task NotifyOpener()
+    {
+        try { await JS.InvokeVoidAsync("nullifyApp.notifyOpener"); } catch (JSDisconnectedException) { }
+    }
+
+    private async Task CloseWindow()
+    {
+        if (closing) return;
+        closing = true;
+        try { await JS.InvokeVoidAsync("nullifyApp.closeWindow"); } catch (JSDisconnectedException) { }
+        closing = false;
+    }
+
+    public void Dispose()
+    {
+        State.StateChanged -= OnStateChanged;
+        State.ComposeOpened -= OnComposeOpened;
+    }
+}

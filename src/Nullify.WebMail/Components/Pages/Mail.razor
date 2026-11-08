@@ -303,6 +303,15 @@
         }, TaskScheduler.Default);
     }
 
+    /// <summary>A message opened in its own window was read, flagged, moved, answered or deleted.</summary>
+    [JSInvokable]
+    public Task OnMessageWindowChanged() => InvokeAsync(() =>
+    {
+        State.FoldersVersion++;
+        State.ListVersion++;
+        State.NotifyStateChanged();
+    });
+
     /// <summary>A notification was clicked: show the message, or the calendar.</summary>
     [JSInvokable]
     public Task OnNotificationClick(string kind, string id) => InvokeAsync(() =>

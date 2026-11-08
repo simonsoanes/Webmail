@@ -186,7 +186,7 @@
     @if (status == Status.Ready)
     {
         <div class="drop-overlay" aria-hidden="true">
-            <div class="drop-hint"><Icon Name="upload" Size="28" /><span>Drop files to upload to @(path == "/" ? current?.Name ?? "Documents" : Crumbs().Last().Name)</span></div>
+            <div class="drop-hint"><Icon Name="upload" Size="28" /><span>Drop files to upload to @(Crumbs().Select(c => c.Name).LastOrDefault() ?? current?.Name ?? "Documents")</span></div>
         </div>
     }
 </div>
@@ -267,8 +267,10 @@
 
     private Task OpenServer(DavServerDto server)
     {
+        // Keep path a real folder ("/"): the page re-renders while the listing loads.
         current = server;
-        path = "";
+        path = "/";
+        justUploaded.Clear();
         return Open("/");
     }
 

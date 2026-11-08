@@ -209,6 +209,7 @@ button:focus:not(:focus-visible) { outline: none; }
     background: var(--surface); min-height: 0;
 }
 .detail-panel { flex: 1; display: flex; flex-direction: column; min-width: 320px; background: var(--surface); overflow: hidden; }
+.detail-panel.message-window { position: fixed; inset: 0; min-width: 0; }
 .page-pane { flex: 1; min-width: 0; overflow-y: auto; background: var(--bg); }
 
 /* ------------------------------------------------------------------ sidebar */

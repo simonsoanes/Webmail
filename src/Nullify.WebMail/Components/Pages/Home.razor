@@ -19,6 +19,10 @@ else if (!Session.IsAuthenticated)
 {
     <Login />
 }
+else if (MessageUid is { } messageUid && !string.IsNullOrEmpty(MessageFolder))
+{
+    <MessageWindow Folder="@MessageFolder" Uid="messageUid" />
+}
 else
 {
     <Mail />
@@ -26,6 +30,10 @@ else
 
 @code {
     private bool ready;
+
+    // Set when a message is opened in a window of its own (double-click in the list).
+    [SupplyParameterFromQuery(Name = "message")] public long? MessageUid { get; set; }
+    [SupplyParameterFromQuery(Name = "folder")] public string? MessageFolder { get; set; }
     private bool needsSetup;
 
     protected override async Task OnInitializedAsync()
