@@ -347,6 +347,20 @@ export function init(form, editor, toolbar, html, mono, dotnet) {
 
         isDirty() { return editor.innerHTML !== initial; },
 
+        /** The editor as it stands, to carry to another window; photos keep their data-cid but not their address. */
+        snapshot() {
+            const body = editor.cloneNode(true);
+            for (const img of body.querySelectorAll('img[data-cid]')) img.removeAttribute('src');
+            return new TextEncoder().encode(body.innerHTML);
+        },
+
+        /** Show a photo carried over from another window. */
+        async showImage(cid, data, type) {
+            const url = URL.createObjectURL(new Blob([await data.arrayBuffer()], { type }));
+            urls.set(cid, url);
+            for (const img of editor.querySelectorAll('img[data-cid]')) if (img.dataset.cid === cid) img.src = url;
+        },
+
         dispose() {
             document.removeEventListener('selectionchange', onSelection);
             document.removeEventListener('mousedown', onOutside);

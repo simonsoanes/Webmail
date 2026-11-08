@@ -265,7 +265,33 @@ window.nullifyApp = (() => {
             openerRefresh = setTimeout(() => dotnet && dotnet.invokeMethodAsync('OnMessageWindowChanged'), 1200);
         },
 
-        closeWindow() { window.close(); },
+        /** Open a message being written in its own window, picking it up by its one-time token. */
+        openCompose(token) {
+            const url = new URL('./', document.baseURI);
+            url.searchParams.set('compose', token);
+            const w = window.open(url.href, `nullify-compose-${token}`, 'popup,width=900,height=820');
+            if (w) w.focus();
+            return !!w;
+        },
+
+        /**
+         * In a pop-out window, where the main window's shortcuts aren't wired: Ctrl/Cmd+Enter sends,
+         * and (while guard is on) closing the window asks first.
+         */
+        windowKeys(ref) {
+            document.addEventListener('keydown', (e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && document.querySelector('.compose-form')) {
+                    e.preventDefault();
+                    ref.invokeMethodAsync('OnSendShortcut');
+                }
+            });
+        },
+
+        guardUnload(on) {
+            window.onbeforeunload = on ? (e) => { e.preventDefault(); e.returnValue = ''; return ''; } : null;
+        },
+
+        closeWindow() { window.onbeforeunload = null; window.close(); },
 
         async copyText(text) {
             try { await navigator.clipboard.writeText(text); return true; } catch { return false; }

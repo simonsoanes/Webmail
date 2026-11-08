@@ -19,6 +19,10 @@ else if (!Session.IsAuthenticated)
 {
     <Login />
 }
+else if (!string.IsNullOrEmpty(ComposeToken))
+{
+    <ComposeWindow Token="@ComposeToken" />
+}
 else if (MessageUid is { } messageUid && !string.IsNullOrEmpty(MessageFolder))
 {
     <MessageWindow Folder="@MessageFolder" Uid="messageUid" />
@@ -34,6 +38,9 @@ else
     // Set when a message is opened in a window of its own (double-click in the list).
     [SupplyParameterFromQuery(Name = "message")] public long? MessageUid { get; set; }
     [SupplyParameterFromQuery(Name = "folder")] public string? MessageFolder { get; set; }
+
+    // Set when a message being written is popped out into a window of its own.
+    [SupplyParameterFromQuery(Name = "compose")] public string? ComposeToken { get; set; }
     private bool needsSetup;
 
     protected override async Task OnInitializedAsync()

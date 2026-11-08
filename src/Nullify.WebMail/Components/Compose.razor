@@ -5,12 +5,18 @@
 @inject CalDavAccountService Dav
 @inject PgpService PgpStore
 @inject PgpBrowser Pgp
+@inject ComposeHandoff Handoff
+@inject UserSession Session
 @implements IAsyncDisposable
 
 <div class="compose-form" @ref="formEl">
     <div class="compose-head">
         <h2>@Title</h2>
         <span class="spacer"></span>
+        @if (!InWindow)
+        {
+            <button class="icon-btn" @onclick="PopOut" disabled="@(loading || sending || attaching)" title="Open in a new window"><Icon Name="pop-out" /></button>
+        }
         <button class="icon-btn" @onclick="Close" title="Close"><Icon Name="x" /></button>
     </div>
 
@@ -227,6 +233,12 @@
         "#5b0f00", "#783f04", "#7f6000", "#274e13", "#0c343d", "#073763", "#20124d", "#4c1130",
     ];
 
+    /// <summary>A message popped out of another window, to carry on with.</summary>
+    [Parameter] public ComposeHandoff.Draft? Draft { get; set; }
+
+    /// <summary>In a window of its own: no pop-out button.</summary>
+    [Parameter] public bool InWindow { get; set; }
+
     private string from = "";
     private string to = "", cc = "", bcc = "", subject = "", body = "";
     private bool showCc, showBcc, important;
@@ -340,7 +352,13 @@
         from = State.Senders.Count > 0 ? State.Senders[0].ToString() : State.Session?.Email ?? State.Session?.Username ?? "";
         var signature = string.IsNullOrWhiteSpace(State.Signature) ? "" : "\n\n-- \n" + State.Signature.TrimEnd();
 
-        if (State.ComposeMode != ComposeMode.New && State.ComposeSourceFolder != null && State.ComposeSourceUid is { } uid)
+        if (Draft is { } d)
+        {
+            (from, to, cc, bcc, showCc, showBcc, subject, body, important, inReplyTo, references) =
+                (d.From, d.To, d.Cc, d.Bcc, d.ShowCc, d.ShowBcc, d.Subject, d.BodyHtml, d.Important, d.InReplyTo, d.References);
+            attachments.AddRange(d.Attachments);
+        }
+        else if (State.ComposeMode != ComposeMode.New && State.ComposeSourceFolder != null && State.ComposeSourceUid is { } uid)
         {
             try
             {
@@ -360,6 +378,7 @@
         }
 
         await InitPgp();
+        if (Draft != null) (sign, encryptTouched, encryptChoice) = (Draft.Sign, Draft.EncryptTouched, Draft.EncryptChoice);
         loading = false;
         focusPending = true;
     }
@@ -375,6 +394,11 @@
             editor = await module.InvokeAsync<IJSObjectReference>("init", formEl, editorEl, toolbarEl, body,
                 State.ComposeFont == "monospace", selfRef);
             await module.DisposeAsync();
+            foreach (var photo in Draft?.Attachments.Where(a => a.ContentId != null) ?? [])
+            {
+                using var data = new DotNetStreamReference(new MemoryStream(photo.Data));
+                await editor.InvokeVoidAsync("showImage", photo.ContentId, data, photo.ContentType);
+            }
         }
         catch (JSDisconnectedException) { return; }
         try
@@ -720,6 +744,33 @@
     private async Task Close()
     {
         if (await IsDirtyAsync() && !await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard this message?")) return;
+        CloseNow();
+    }
+
+    /// <summary>Carry the message as it stands to a window of its own, freeing this one.</summary>
+    private async Task PopOut()
+    {
+        if (editor == null || Session.Credential is not { } cred) return;
+        string html;
+        try
+        {
+            var data = await editor.InvokeAsync<IJSStreamReference>("snapshot");
+            await using var stream = await data.OpenReadStreamAsync(MaxAttachmentBytes);
+            using var reader = new StreamReader(stream);
+            html = await reader.ReadToEndAsync();
+        }
+        catch (JSDisconnectedException) { return; }
+
+        var draft = new ComposeHandoff.Draft(State.ComposeMode, State.ComposeSourceFolder, State.ComposeSourceUid,
+            from, to, cc, bcc, showCc, showBcc, subject, html, important, inReplyTo, references,
+            attachments.ToList(), sign, encryptTouched, encryptChoice);
+        var token = Handoff.Put(cred.Login, draft);
+        if (!await JS.InvokeAsync<bool>("nullifyApp.openCompose", token))
+        {
+            Handoff.Take(cred.Login, token);
+            error = "Your browser blocked the new window — allow pop-ups for this site.";
+            return;
+        }
         CloseNow();
     }
 

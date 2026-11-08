@@ -1,0 +1,118 @@
+@using Nullify.WebMail.Services
+@inject ApiService Api
+@inject AppState State
+@inject IJSRuntime JS
+@inject BrandingService Branding
+@inject ComposeHandoff Handoff
+@inject UserSession Session
+@implements IDisposable
+
+@* A message being written, popped out of another window so several can be on the go at once.
+   The draft arrives through ComposeHandoff under a one-time token; the window closes itself
+   once the message is sent, saved as a draft or discarded. *@
+
+<PageTitle>@(draft?.Subject is { Length: > 0 } s ? s : "New message") · @State.BrandTitle WebMail</PageTitle>
+
+<section class="detail-panel mobile-visible message-window">
+    @if (!ready)
+    {
+        <div class="boot"><span class="spinner"></span> Loading…</div>
+    }
+    else if (draft == null)
+    {
+        <div class="empty-state">
+            <div class="empty-icon"><Icon Name="mail" Size="26" /></div>
+            <h3>This message is no longer here</h3>
+            <p>A popped-out message can only be opened once, and only for a couple of minutes.</p>
+            <button class="btn small" @onclick="CloseWindow">Close window</button>
+        </div>
+    }
+    else if (State.ShowCompose)
+    {
+        <Compose Draft="draft" InWindow="true" />
+    }
+</section>
+
+<div class="toasts" role="status" aria-live="polite">
+    @foreach (var toast in State.Toasts)
+    {
+        <div class="toast @(toast.IsError ? "error" : "")">
+            <span>@toast.Message</span>
+            <span class="spacer"></span>
+            <button @onclick="() => State.DismissToast(toast.Id)" title="Dismiss"><Icon Name="x" Size="15" /></button>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Token { get; set; } = "";
+
+    private bool ready;
+    private ComposeHandoff.Draft? draft;
+    private int seenFoldersVersion;
+    private DotNetObjectReference<ComposeWindow>? selfRef;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // The draft can be taken once: leave it for the interactive circuit, not the prerender.
+        if (!RendererInfo.IsInteractive || Session.Credential is not { } cred) return;
+
+        draft = Handoff.Take(cred.Login, Token);
+        if (draft != null)
+        {
+            State.ActiveTab = "mail";
+            State.ComposeMode = draft.Mode;
+            State.ComposeSourceFolder = draft.SourceFolder;
+            State.ComposeSourceUid = draft.SourceUid;
+            State.SelectedFolder = draft.SourceFolder;
+            State.ShowCompose = true;
+            await PopOutWindow.LoadAsync(Api, Branding, State);
+        }
+        seenFoldersVersion = State.FoldersVersion;
+        State.StateChanged += OnStateChanged;
+        ready = true;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || !RendererInfo.IsInteractive) return;
+        try
+        {
+            selfRef = DotNetObjectReference.Create(this);
+            if (await PopOutWindow.InitBrowserAsync(JS, State, selfRef)) StateHasChanged();
+            // Closing the window would lose the message; ask first.
+            if (draft != null) await JS.InvokeVoidAsync("nullifyApp.guardUnload", true);
+        }
+        catch (JSDisconnectedException) { }
+    }
+
+    [JSInvokable]
+    public Task OnSendShortcut() => InvokeAsync(() => State.SendHandler?.Invoke() ?? Task.CompletedTask);
+
+    private async void OnStateChanged() => await InvokeAsync(async () =>
+    {
+        // Sent, or saved as a draft: the main window's folders and list are stale.
+        if (State.FoldersVersion != seenFoldersVersion)
+        {
+            seenFoldersVersion = State.FoldersVersion;
+            try { await JS.InvokeVoidAsync("nullifyApp.notifyOpener"); } catch (JSDisconnectedException) { }
+        }
+        if (draft != null && !State.ShowCompose)
+        {
+            await CloseWindow();
+            return;
+        }
+        StateHasChanged();
+    });
+
+    private async Task CloseWindow()
+    {
+        try { await JS.InvokeVoidAsync("nullifyApp.closeWindow"); } catch (JSDisconnectedException) { }
+    }
+
+    public void Dispose()
+    {
+        State.StateChanged -= OnStateChanged;
+        selfRef?.Dispose();
+    }
+}

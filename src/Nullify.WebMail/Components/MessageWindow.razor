@@ -57,6 +57,7 @@
     private MessageSummary? summary;
     private IReadOnlyList<MessageSummary>? seenMessages;
     private int seenFoldersVersion;
+    private DotNetObjectReference<MessageWindow>? selfRef;
 
     protected override async Task OnInitializedAsync()
     {
@@ -83,18 +84,7 @@
         catch { /* the reading pane shows its own load error */ }
 
         // Archive, Move and Reply need the folder list, signature and senders, as in the main window.
-        try { State.Folders = await Api.GetFoldersAsync(); } catch { }
-        try
-        {
-            foreach (var p in await Api.GetPreferencesAsync())
-            {
-                if (p.Key == "compose.signature") State.Signature = p.Value ?? "";
-                if (p.Key == "compose.font") State.ComposeFont = p.Value ?? "sans-serif";
-            }
-        }
-        catch { }
-        try { State.Senders = await Api.GetSendersAsync(); } catch { }
-        try { State.BrandTitle = await Branding.TitleAsync(); } catch { }
+        await PopOutWindow.LoadAsync(Api, Branding, State);
 
         seenMessages = State.CurrentMessages;
         seenFoldersVersion = State.FoldersVersion;
@@ -106,12 +96,8 @@
         if (!firstRender) return;
         try
         {
-            var tz = await JS.InvokeAsync<string>("nullifyApp.timeZone");
-            if (!string.IsNullOrEmpty(tz) && TimeZoneInfo.TryFindSystemTimeZoneById(tz, out var zone))
-            {
-                State.TimeZone = zone;
-                StateHasChanged();
-            }
+            selfRef = DotNetObjectReference.Create(this);
+            if (await PopOutWindow.InitBrowserAsync(JS, State, selfRef)) StateHasChanged();
             // Opening it marks it read; let the list show that.
             await JS.InvokeVoidAsync("nullifyApp.notifyOpener");
         }
@@ -119,6 +105,9 @@
     }
 
     private void OnComposeOpened() => composeKey++;
+
+    [JSInvokable]
+    public Task OnSendShortcut() => InvokeAsync(() => State.SendHandler?.Invoke() ?? Task.CompletedTask);
 
     private async void OnStateChanged() => await InvokeAsync(async () =>
     {
@@ -158,5 +147,6 @@
     {
         State.StateChanged -= OnStateChanged;
         State.ComposeOpened -= OnComposeOpened;
+        selfRef?.Dispose();
     }
 }

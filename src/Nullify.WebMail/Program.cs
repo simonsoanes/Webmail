@@ -61,6 +61,7 @@ builder.Services.AddSingleton<ManageSieveClient>();
 builder.Services.AddSingleton<ConnectionPool>();
 builder.Services.AddSingleton<IdentityService>();
 builder.Services.AddSingleton<MailService>();
+builder.Services.AddSingleton(_ => new ComposeHandoff(TimeProvider.System));
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddScoped<TrustedDeviceService>();
 builder.Services.AddScoped<PasskeyService>();
