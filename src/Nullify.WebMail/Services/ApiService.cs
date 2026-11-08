@@ -215,6 +215,30 @@ public class ApiService(
         await s.SetActiveAsync(name);
     }
 
+    /// <summary>
+    /// Add a rule to the end of the active script, or to a new active script when none is active.
+    /// Stops short (changing nothing) when the script can't be edited as rules, or when saving it
+    /// would lose the user's comments and <paramref name="dropComments"/> isn't set.
+    /// </summary>
+    public async Task<SieveRuleSaveResult> AddSieveRuleAsync(SieveRule rule, bool dropComments = false)
+    {
+        await using var s = await ConnectSieveAsync();
+        var scripts = await s.ListScriptsAsync();
+        var active = scripts.FirstOrDefault(x => x.IsActive);
+        var name = active?.Name
+            ?? new[] { "main", "webmail", "webmail-rules" }.FirstOrDefault(n => scripts.All(x => x.Name != n))
+            ?? $"webmail-{DateTime.UtcNow:yyyyMMddHHmmss}";
+        var existing = active != null ? await s.GetScriptAsync(name) : null;
+
+        var edit = SieveScriptEdit.Append(existing, rule);
+        if (edit.Script == null) return new SieveRuleSaveResult(SieveRuleOutcome.Unreadable, name, edit.Error);
+        if (edit.DropsComments && !dropComments) return new SieveRuleSaveResult(SieveRuleOutcome.NeedsCommentsDropped, name);
+
+        await s.PutScriptAsync(name, edit.Script);
+        if (active == null) await s.SetActiveAsync(name);
+        return new SieveRuleSaveResult(SieveRuleOutcome.Added, name, Created: active == null);
+    }
+
     private async Task<ManageSieveSession> ConnectSieveAsync()
     {
         var endpoint = SieveEndpoint.For(Cred.SieveHost, Cred.SievePort);

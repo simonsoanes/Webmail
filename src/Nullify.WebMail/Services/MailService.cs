@@ -201,6 +201,16 @@ public sealed class MailService(ConnectionPool pool, SmtpClient smtp, SettingsSe
         return html;
     }
 
+    /// <summary>The message exactly as stored (an .eml), and its subject; leaves it unread.</summary>
+    public Task<(byte[] Raw, string Subject)> GetRawAsync(CredentialInfo cred, string folder, long uid) =>
+        WithSession(cred, async s =>
+        {
+            await s.SelectFolderAsync(folder);
+            var raw = await s.FetchLiteralAsync($"UID FETCH {uid} (BODY.PEEK[])");
+            var headers = MimeParser.Parse(raw).Headers;
+            return (raw, headers != null && headers.TryGetValue("Subject", out var subject) ? subject : "");
+        });
+
     public Task<MimeAttachment?> GetAttachmentAsync(CredentialInfo cred, string folder, long uid, string partId) =>
         WithSession(cred, async s =>
         {

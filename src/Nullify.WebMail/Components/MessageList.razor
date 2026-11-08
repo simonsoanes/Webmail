@@ -206,6 +206,9 @@
                 <button class="menu-item" @onclick="() => ReplyFromContext(ComposeMode.Reply, single.Uid)"><Icon Name="reply" Size="16" /> <span>Reply</span></button>
                 <button class="menu-item" @onclick="() => ReplyFromContext(ComposeMode.ReplyAll, single.Uid)"><Icon Name="reply-all" Size="16" /> <span>Reply all</span></button>
                 <button class="menu-item" @onclick="() => ReplyFromContext(ComposeMode.Forward, single.Uid)"><Icon Name="forward" Size="16" /> <span>Forward</span></button>
+                <div class="menu-sep"></div>
+                <button class="menu-item" @onclick="() => RuleFromContext(single)"><Icon Name="filter" Size="16" /> <span>Create rule…</span></button>
+                <button class="menu-item" @onclick="() => SaveAsFromContext(single.Uid)"><Icon Name="download" Size="16" /> <span>Save as…</span></button>
             }
             else
             {
@@ -232,6 +235,11 @@
             <button class="menu-item danger" @onclick="() => FromContext(Actions.DeleteAsync, clear: true)"><Icon Name="trash" Size="16" /> <span>Delete</span></button>
         }
     </ContextMenu>
+}
+
+@if (ruleFor != null)
+{
+    <RuleFromMessage Message="ruleFor" OnClose="() => ruleFor = null" />
 }
 
 @code {
@@ -407,6 +415,23 @@
         CloseContext();
         if (clear) State.CheckedUids.ExceptWith(uids);
         await action(uids);
+    }
+
+    private MessageSummary? ruleFor;
+
+    private void RuleFromContext(MessageSummary message)
+    {
+        CloseContext();
+        ruleFor = message;
+    }
+
+    /// <summary>Download the message as an .eml file.</summary>
+    private async Task SaveAsFromContext(long uid)
+    {
+        CloseContext();
+        if (State.SelectedFolder is not { } folder) return;
+        await JS.InvokeVoidAsync("nullifyApp.download",
+            $"api/mail/eml?folder={Uri.EscapeDataString(folder)}&uid={uid}");
     }
 
     private void OpenFromContext(long uid)

@@ -291,6 +291,16 @@ window.nullifyApp = (() => {
             window.onbeforeunload = on ? (e) => { e.preventDefault(); e.returnValue = ''; return ''; } : null;
         },
 
+        /** Start a download from a same-origin URL (the server names the file). */
+        download(url) {
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = '';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        },
+
         closeWindow() { window.onbeforeunload = null; window.close(); },
 
         async copyText(text) {

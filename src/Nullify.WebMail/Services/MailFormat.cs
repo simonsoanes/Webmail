@@ -18,6 +18,15 @@ public static partial class MailFormat
         public override string ToString() => Name.Length > 0 ? $"{Name} <{Email}>" : Email;
     }
 
+    /// <summary>A safe file name for a message saved as .eml: its subject, minus characters files can't hold.</summary>
+    public static string EmlFileName(string? subject)
+    {
+        var name = Regex.Replace(subject ?? "", @"[\x00-\x1f\x7f<>:""/\\|?*]+", " ");
+        name = Regex.Replace(name, @"\s+", " ").Trim().TrimEnd('.', ' ');
+        if (name.Length > 120) name = name[..120].TrimEnd('.', ' ');
+        return (name.Length > 0 ? name : "message") + ".eml";
+    }
+
     /// <summary>Split an address-list header on commas that are not inside quotes or angle brackets.</summary>
     public static List<Address> ParseAddressList(string? header)
     {

@@ -54,6 +54,16 @@ public class MailController(AuthService auth, MailService mail) : ControllerBase
     public Task<IActionResult> AttachmentByQuery([FromQuery] string folder, [FromQuery] long uid, [FromQuery] string part) =>
         Attachment(folder, uid, part);
 
+    /// <summary>Download the whole message as an .eml file, named after its subject.</summary>
+    [HttpGet("eml")]
+    public async Task<IActionResult> Eml([FromQuery] string folder, [FromQuery] long uid)
+    {
+        if (Cred is not { } cred) return Unauthorized();
+        var (raw, subject) = await mail.GetRawAsync(cred, folder, uid);
+        if (raw.Length == 0) return NotFound();
+        return File(raw, "message/rfc822", MailFormat.EmlFileName(subject));
+    }
+
     [HttpPut("folders/{folderName}/messages/{uid:long}/flags")]
     public async Task<IActionResult> SetFlags(string folderName, long uid, [FromBody] FlagRequest req)
     {

@@ -50,6 +50,8 @@
                 <div class="menu" role="menu">
                     <button class="menu-item" @onclick="ToggleSource"><Icon Name="code" Size="16" /> @(showSource ? "Show message" : "View source")</button>
                     <button class="menu-item" @onclick="() => { showDetails = !showDetails; moreOpen = false; }"><Icon Name="file" Size="16" /> @(showDetails ? "Hide" : "Show") header details</button>
+                    <a class="menu-item" href="@($"api/mail/eml?folder={Uri.EscapeDataString(State.SelectedFolder ?? "")}&uid={id}")" download
+                       @onclick="() => moreOpen = false"><Icon Name="download" Size="16" /> Save as…</a>
                     @if (hasRemoteContent && !remoteContentAllowed)
                     {
                         <button class="menu-item" @onclick="AllowRemoteContent"><Icon Name="image-off" Size="16" /> Load remote content</button>

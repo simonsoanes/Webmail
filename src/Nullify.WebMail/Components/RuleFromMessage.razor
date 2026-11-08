@@ -1,0 +1,157 @@
+@using Nullify.WebMail.Services
+@inject ApiService Api
+@inject AppState State
+@inject MailActions Actions
+@inject IJSRuntime JS
+
+@* "Mail like this": a server-side Sieve filter made from one message, added to the active script. *@
+<div class="modal-backdrop" @onclick="Cancel">
+    <form class="modal rule-from-message" role="dialog" aria-modal="true" aria-labelledby="rule-heading"
+          @onclick:stopPropagation="true" @onsubmit="Save" @onsubmit:preventDefault="true">
+        <div class="modal-head">
+            <Icon Name="filter" />
+            <h3 id="rule-heading">Create a rule</h3>
+            <span class="spacer"></span>
+            <button type="button" class="icon-btn" @onclick="Cancel" title="Close"><Icon Name="x" /></button>
+        </div>
+
+        <div class="modal-body">
+            <p class="muted small-print">Runs on the server as mail arrives, even when you're signed out.</p>
+
+            <h4 class="rule-heading">When a new message…</h4>
+            <div class="rule-match">
+                <label class="check-row">
+                    <input type="checkbox" @bind="rule.UseSender" />
+                    <select class="compact" @bind="rule.SenderMatch" disabled="@(!rule.UseSender)" aria-label="Match the sender's address or domain">
+                        <option value="@SenderMatch.Address">is from</option>
+                        <option value="@SenderMatch.Domain">is from anyone at</option>
+                    </select>
+                </label>
+                <input @bind="SenderText" @bind:event="oninput" disabled="@(!rule.UseSender)" aria-label="Sender" />
+
+                <label class="check-row">
+                    <input type="checkbox" @bind="rule.UseSubject" />
+                    <span>has a subject containing</span>
+                </label>
+                <input @bind="rule.Subject" @bind:event="oninput" disabled="@(!rule.UseSubject)" aria-label="Subject text" />
+            </div>
+
+            <h4 class="rule-heading">…then</h4>
+            <label class="check-row">
+                <input type="checkbox" checked="@(moveTo != null)" @onchange="ToggleMove" />
+                <span>Move it to</span>
+            </label>
+            <select @bind="MoveTarget" disabled="@(moveTo == null)" aria-label="Folder" class="rule-folder">
+                @foreach (var f in State.OrderedFolders())
+                {
+                    <option value="@f.Name">@MailFormat.FolderLeaf(f)</option>
+                }
+            </select>
+            <label class="check-row"><input type="checkbox" @bind="rule.MarkRead" /> <span>Mark it as read</span></label>
+            <label class="check-row"><input type="checkbox" @bind="rule.Flag" /> <span>Star it</span></label>
+
+            <div class="field">
+                <label for="rule-name">Rule name</label>
+                <input id="rule-name" @bind="rule.Name" @bind:event="oninput" placeholder="@rule.DefaultName()" maxlength="200" />
+            </div>
+
+            <label class="check-row"><input type="checkbox" @bind="applyNow" /> <span>Also do this to the message now</span></label>
+
+            @if (error != null)
+            {
+                <div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@error</div></div>
+            }
+        </div>
+
+        <div class="modal-foot">
+            <span class="spacer"></span>
+            <button type="button" class="btn" @onclick="Cancel">Cancel</button>
+            <button type="submit" class="btn accent" disabled="@busy">
+                @if (busy) { <span class="spinner"></span> } Create rule
+            </button>
+        </div>
+    </form>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public MessageSummary Message { get; set; } = default!;
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private SieveQuickRule rule = new();
+    private string? moveTo;
+    private string lastFolder = "";
+    private bool applyNow = true;
+    private bool busy;
+    private string? error;
+
+    // What's typed for the sender, kept apart from the rule's value so switching to "domain" keeps it.
+    private string SenderText
+    {
+        get => rule.SenderMatch == SenderMatch.Domain ? SieveQuickRule.DomainOf(rule.Sender) : rule.Sender;
+        set => rule.Sender = value;
+    }
+
+    private string MoveTarget
+    {
+        get => moveTo ?? lastFolder;
+        set => moveTo = lastFolder = value;
+    }
+
+    protected override void OnInitialized()
+    {
+        rule = SieveQuickRule.From(Message.From, Message.Subject);
+        // Suggest the Archive folder, else the first folder that isn't this one.
+        lastFolder = State.FindSpecialFolder("Archive")?.Name
+                     ?? State.OrderedFolders().FirstOrDefault(f => f.Name != State.SelectedFolder)?.Name
+                     ?? "INBOX";
+        moveTo = lastFolder;
+    }
+
+    private void ToggleMove(ChangeEventArgs e) => moveTo = e.Value is true ? lastFolder : null;
+
+    private async Task Save()
+    {
+        rule.MoveTo = moveTo;
+        error = rule.Problem();
+        if (error != null) return;
+        busy = true;
+        try
+        {
+            var sieveRule = rule.ToRule();
+            var result = await Api.AddSieveRuleAsync(sieveRule);
+            if (result.Outcome == SieveRuleOutcome.NeedsCommentsDropped)
+            {
+                if (!await JS.InvokeAsync<bool>("nullifyApp.confirm",
+                        $"Adding this rule rewrites your filter script \"{result.Script}\" and removes the comments in it. Continue?"))
+                    return;
+                result = await Api.AddSieveRuleAsync(sieveRule, dropComments: true);
+            }
+            if (result.Outcome == SieveRuleOutcome.Unreadable)
+            {
+                error = $"Your active filter script \"{result.Script}\" is written in a way the rule editor can't read ({result.Error}), " +
+                        "so the rule wasn't added. Add it in Settings → Filters, in Script mode.";
+                return;
+            }
+            State.ShowToast(result.Created
+                ? $"Rule \"{sieveRule.Name}\" created in a new filter script \"{result.Script}\""
+                : $"Rule \"{sieveRule.Name}\" added to \"{result.Script}\"");
+            if (applyNow) await ApplyToMessage();
+            await OnClose.InvokeAsync();
+        }
+        catch (Exception ex)
+        {
+            error = $"Couldn't save the rule: {ex.InnerException?.Message ?? ex.Message}";
+        }
+        finally { busy = false; }
+    }
+
+    /// <summary>Do the same to the message the rule was made from (flags first, then the move).</summary>
+    private async Task ApplyToMessage()
+    {
+        if (rule.MarkRead) await Actions.SetSeenAsync([Message.Uid], true);
+        if (rule.Flag) await Actions.SetFlaggedAsync([Message.Uid], true);
+        if (rule.MoveTo != null && rule.MoveTo != State.SelectedFolder) await Actions.MoveAsync([Message.Uid], rule.MoveTo);
+    }
+
+    private Task Cancel() => OnClose.InvokeAsync();
+}
