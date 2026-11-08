@@ -209,6 +209,7 @@
             <button class="menu-item" @onclick="() => FromContext(() => CopyName(ci))"><Icon Name="copy" Size="16" /> <span>Copy name</span></button>
             <div class="menu-sep"></div>
             <button class="menu-item" @onclick="() => FromContext(() => { StartRename(ci); return Task.CompletedTask; })"><Icon Name="pen" Size="16" /> <span>Rename</span></button>
+            <button class="menu-item" @onclick="() => FromContext(() => { moving = ci; return Task.CompletedTask; })"><Icon Name="folder-input" Size="16" /> <span>Move…</span></button>
             <div class="menu-sep"></div>
             <button class="menu-item danger" @onclick="() => FromContext(() => Delete(ci))"><Icon Name="trash" Size="16" /> <span>@(ci.IsFolder ? "Delete folder" : "Delete")</span></button>
         }
@@ -219,6 +220,12 @@
             <button class="menu-item" @onclick="() => FromContext(Refresh)" disabled="@loading"><Icon Name="refresh" Size="16" /> <span>Refresh</span></button>
         }
     </ContextMenu>
+}
+
+@if (moving is { } mv)
+{
+    <DocFolderPicker Server="@current?.Id" RootName="@(current?.Name ?? "Documents")" Item="mv" CurrentFolder="@path"
+                     OnMoved="dest => Moved(mv, dest)" OnClose="() => moving = null" />
 }
 
 @code {
@@ -247,6 +254,7 @@
     // The right-click menu: where, and for which item (none = the open folder).
     private (double X, double Y)? ctxAt;
     private DavItem? ctxItem;
+    private DavItem? moving;
 
     private ElementReference shell;
     private bool uploading;
@@ -451,6 +459,14 @@
     {
         if (await JS.InvokeAsync<bool>("nullifyApp.copyText", item.Name)) State.ShowToast("Name copied");
         else State.ShowToast("Couldn't copy to the clipboard", isError: true);
+    }
+
+    private async Task Moved(DavItem item, string destination)
+    {
+        moving = null;
+        var where = destination.Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? current?.Name ?? "Documents";
+        State.ShowToast($"Moved \"{item.Name}\" to {where}");
+        await Open(path);
     }
 
     // ---- folders, rename, delete ----

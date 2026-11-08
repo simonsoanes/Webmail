@@ -1,0 +1,163 @@
+@using Nullify.WebMail.Services
+@inject WebDavService Dav
+
+@* Moving a file or folder elsewhere on the same server. The server does the move (WebDAV MOVE); nothing is downloaded. *@
+<div class="modal-backdrop" @onclick="Cancel">
+    <form class="modal doc-move" role="dialog" aria-modal="true" aria-labelledby="move-heading"
+          @onclick:stopPropagation="true" @onsubmit="Move" @onsubmit:preventDefault="true">
+        <div class="modal-head">
+            <h3 id="move-heading">Move “@Item.Name”</h3>
+            <span class="spacer"></span>
+            <button type="button" class="icon-btn" @onclick="Cancel" title="Close"><Icon Name="x" /></button>
+        </div>
+
+        <div class="modal-body">
+            <p class="muted">Choose the folder to move it to.</p>
+            <div class="move-tree" role="tree" aria-label="Folders">
+                @foreach (var (path, name, depth) in Visible())
+                {
+                    var p = path;
+                    var allowed = Allowed(p);
+                    var canExpand = p != ItemPath && (!children.TryGetValue(p, out var kids) || kids.Count > 0);
+                    <div class="move-node @(selected == p ? "selected" : null) @(allowed ? null : "disabled")" role="treeitem"
+                         aria-selected="@(selected == p ? "true" : "false")" aria-disabled="@(allowed ? null : "true")"
+                         aria-expanded="@(canExpand ? (expanded.Contains(p) ? "true" : "false") : null)"
+                         style="--depth:@depth">
+                        @if (canExpand)
+                        {
+                            <button type="button" class="move-toggle" @onclick="() => Toggle(p)" title="@(expanded.Contains(p) ? "Collapse" : "Expand")">
+                                @if (loadingPaths.Contains(p)) { <span class="spinner"></span> }
+                                else { <Icon Name="@(expanded.Contains(p) ? "chevron-down" : "chevron-right")" Size="14" /> }
+                            </button>
+                        }
+                        else
+                        {
+                            <span class="move-toggle"></span>
+                        }
+                        <button type="button" class="move-name" disabled="@(!allowed)" @onclick="() => selected = p" @ondblclick="() => Toggle(p)">
+                            <Icon Name="@(p == "/" ? "hard-drive" : "folder")" Size="16" Class="ic-folder" />
+                            <span>@name</span>
+                            @if (p == ParentPath) { <span class="muted move-here">current</span> }
+                        </button>
+                    </div>
+                }
+            </div>
+
+            @if (error != null)
+            {
+                <div class="alert err" role="alert"><Icon Name="alert" Size="15" /><div>@error</div></div>
+            }
+        </div>
+
+        <div class="modal-foot">
+            <span class="spacer"></span>
+            <button type="button" class="btn" @onclick="Cancel" disabled="@busy">Cancel</button>
+            <button type="submit" class="btn accent" disabled="@(busy || selected == null)">
+                @if (busy) { <span class="spinner"></span> } Move here
+            </button>
+        </div>
+    </form>
+</div>
+
+@code {
+    /// <summary>Null for the main Documents server, else the id of one of the user's own.</summary>
+    [Parameter] public string? Server { get; set; }
+    [Parameter] public string RootName { get; set; } = "Documents";
+    [Parameter, EditorRequired] public DavItem Item { get; set; } = default!;
+    /// <summary>The folder being shown, opened up in the tree to start with.</summary>
+    [Parameter] public string CurrentFolder { get; set; } = "/";
+    /// <summary>Raised with the destination folder once the server has moved it.</summary>
+    [Parameter] public EventCallback<string> OnMoved { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    // Folder path ("/a/b/") → its subfolders, once loaded.
+    private readonly Dictionary<string, List<DavItem>> children = new(StringComparer.Ordinal);
+    private readonly HashSet<string> expanded = new(StringComparer.Ordinal);
+    private readonly HashSet<string> loadingPaths = new(StringComparer.Ordinal);
+    private string? selected;
+    private string? error;
+    private bool busy;
+
+    private string ItemPath => Item.IsFolder ? Item.Path.TrimEnd('/') + "/" : Item.Path;
+    private string ParentPath => Item.Path.TrimEnd('/')[..(Item.Path.TrimEnd('/').LastIndexOf('/') + 1)];
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Open the tree down to where the user is now.
+        var path = "/";
+        await Expand(path);
+        foreach (var part in CurrentFolder.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            path += part + "/";
+            if (path == ItemPath || !children.ContainsKey(path[..(path.TrimEnd('/').LastIndexOf('/') + 1)])) break;
+            await Expand(path);
+        }
+    }
+
+    private IEnumerable<(string Path, string Name, int Depth)> Visible()
+    {
+        var stack = new Stack<(string, string, int)>();
+        stack.Push(("/", RootName, 0));
+        while (stack.Count > 0)
+        {
+            var (path, name, depth) = stack.Pop();
+            yield return (path, name, depth);
+            if (!expanded.Contains(path) || !children.TryGetValue(path, out var kids)) continue;
+            foreach (var k in Enumerable.Reverse(kids)) stack.Push((k.Path.TrimEnd('/') + "/", k.Name, depth + 1));
+        }
+    }
+
+    /// <summary>Not where it already is, and a folder never into itself.</summary>
+    private bool Allowed(string path) =>
+        path != ParentPath && !(Item.IsFolder && path.StartsWith(ItemPath, StringComparison.Ordinal));
+
+    private async Task Toggle(string path)
+    {
+        if (path == ItemPath) return;
+        if (!expanded.Remove(path)) await Expand(path);
+    }
+
+    private async Task Expand(string path)
+    {
+        if (!children.ContainsKey(path))
+        {
+            loadingPaths.Add(path);
+            try
+            {
+                var listing = await Dav.ListAsync(Server, path);
+                children[path] = listing.Items.Where(i => i.IsFolder)
+                    .OrderBy(i => i.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
+            }
+            catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException or InvalidOperationException)
+            {
+                error = ex is TaskCanceledException ? "The server did not respond in time." : ex.Message;
+                return;
+            }
+            finally
+            {
+                loadingPaths.Remove(path);
+            }
+        }
+        expanded.Add(path);
+    }
+
+    private async Task Move()
+    {
+        if (busy || selected is not { } dest || !Allowed(dest)) return;
+        busy = true;
+        error = null;
+        try
+        {
+            await Dav.MoveAsync(Server, Item, dest);
+            busy = false;
+            await OnMoved.InvokeAsync(dest);
+        }
+        catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException or InvalidOperationException)
+        {
+            error = ex is TaskCanceledException ? "The server did not respond in time." : ex.Message;
+            busy = false;
+        }
+    }
+
+    private Task Cancel() => busy ? Task.CompletedTask : OnClose.InvokeAsync();
+}

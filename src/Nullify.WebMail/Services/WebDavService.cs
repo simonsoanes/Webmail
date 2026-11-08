@@ -229,6 +229,40 @@ public sealed class WebDavService(
         EnsureSuccess(resp, "rename it");
     }
 
+    /// <summary>
+    /// Move a file, or a folder with everything in it, into another folder on the same server.
+    /// One WebDAV MOVE: the server does the work, nothing passes through here.
+    /// </summary>
+    public async Task MoveAsync(string? server, DavItem item, string destinationFolder)
+    {
+        var account = await ResolveAccountAsync(server);
+        var target = MoveTarget(item, destinationFolder);
+        var headers = new Dictionary<string, string> { ["Destination"] = ToUri(account, target, item.IsFolder).AbsoluteUri, ["Overwrite"] = "F" };
+        if (item.IsFolder) headers["Depth"] = "infinity";
+        using var resp = await SendAsync(account, new HttpMethod("MOVE"), ToUri(account, item.Path, item.IsFolder), null, headers);
+        switch (resp.StatusCode)
+        {
+            case HttpStatusCode.PreconditionFailed: throw new CalDavException($"\"{item.Name}\" already exists in that folder.");
+            case HttpStatusCode.Conflict: throw new CalDavException("That folder no longer exists.");
+            case HttpStatusCode.NotFound: throw new CalDavException($"\"{item.Name}\" no longer exists.");
+            case HttpStatusCode.InsufficientStorage: throw new CalDavException("There isn't enough space left in your storage.");
+        }
+        EnsureSuccess(resp, "move it");
+    }
+
+    /// <summary>Where <paramref name="item"/> ends up inside <paramref name="destinationFolder"/>; refuses a move that goes nowhere or into itself.</summary>
+    public static string MoveTarget(DavItem item, string destinationFolder)
+    {
+        var source = NormalizePath(item.Path).TrimEnd('/');
+        var dest = NormalizePath(destinationFolder).TrimEnd('/');
+        var parent = source[..source.LastIndexOf('/')];
+        if (string.Equals(dest, parent, StringComparison.Ordinal))
+            throw new CalDavException($"\"{item.Name}\" is already in that folder.");
+        if (item.IsFolder && (dest == source || dest.StartsWith(source + "/", StringComparison.Ordinal)))
+            throw new CalDavException("A folder can't be moved into itself.");
+        return Combine(dest, ValidName(item.Name));
+    }
+
     /// <summary>Stream a file up. Without <paramref name="overwrite"/>, an existing file of that name is an error.</summary>
     public async Task UploadAsync(string? server, string folderPath, string fileName, Stream content, long length, string? contentType,
         bool overwrite, CancellationToken ct)

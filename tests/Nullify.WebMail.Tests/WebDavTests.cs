@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using Nullify.WebMail.Services;
+using Nullify.WebMail.Shared;
 
 namespace Nullify.WebMail.Tests;
 
@@ -21,6 +22,28 @@ public class WebDavTests
     {
         Assert.ThrowsExactly<CalDavException>(() => WebDavService.NormalizePath("/a/../../etc/passwd"));
         Assert.ThrowsExactly<CalDavException>(() => WebDavService.NormalizePath("./x"));
+    }
+
+    [TestMethod]
+    public void MoveTarget_PutsTheItemInsideTheDestination()
+    {
+        var file = new DavItem("a.txt", "/docs/a.txt", false, 1, null, null);
+        Assert.AreEqual("/a.txt", WebDavService.MoveTarget(file, "/"));
+        Assert.AreEqual("/other/sub/a.txt", WebDavService.MoveTarget(file, "/other/sub/"));
+
+        var folder = new DavItem("Photos", "/docs/Photos/", true, null, null, null);
+        Assert.AreEqual("/Archive/Photos", WebDavService.MoveTarget(folder, "/Archive/"));
+        Assert.AreEqual("/docs/Photos2/Photos", WebDavService.MoveTarget(folder, "/docs/Photos2/")); // a sibling sharing a prefix is fine
+    }
+
+    [TestMethod]
+    public void MoveTarget_RefusesMovesThatGoNowhereOrIntoThemselves()
+    {
+        var folder = new DavItem("Photos", "/docs/Photos/", true, null, null, null);
+        Assert.ThrowsExactly<CalDavException>(() => WebDavService.MoveTarget(folder, "/docs/"));
+        Assert.ThrowsExactly<CalDavException>(() => WebDavService.MoveTarget(folder, "/docs/Photos/"));
+        Assert.ThrowsExactly<CalDavException>(() => WebDavService.MoveTarget(folder, "/docs/Photos/2024/"));
+        Assert.ThrowsExactly<CalDavException>(() => WebDavService.MoveTarget(new DavItem("a.txt", "/a.txt", false, 1, null, null), "/"));
     }
 
     [TestMethod]
