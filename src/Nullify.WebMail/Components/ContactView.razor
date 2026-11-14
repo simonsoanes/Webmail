@@ -345,7 +345,6 @@
             list = await Dav.GetContactsAsync();
             selected = null;
             editing = false;
-            StateHasChanged();
         }
         catch (Exception ex) when (ex is CalDavException or HttpRequestException or TaskCanceledException)
         {

@@ -74,8 +74,13 @@
     // The ceremonies run in the browser, which sends the PRF-derived key to the server by fetch, never through this circuit.
     private async Task<PasskeyOutcome> RunInBrowser(string function, params object[] args)
     {
-        module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/passkey.js");
-        return await module.InvokeAsync<PasskeyOutcome>(function, args);
+        try
+        {
+            module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./js/passkey.js");
+            return await module.InvokeAsync<PasskeyOutcome>(function, args);
+        }
+        // JSException messages carry the JS stack after the first line.
+        catch (JSException ex) { return new PasskeyOutcome(false, ex.Message.Split('\n')[0].Trim()); }
     }
 
     private async Task Add() => await Ceremony(() => RunInBrowser("register"), "Passkey added. Next time, choose Sign in with a passkey.");

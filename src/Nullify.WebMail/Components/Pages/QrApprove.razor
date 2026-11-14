@@ -143,8 +143,9 @@
             if (!string.IsNullOrEmpty(tz) && TimeZoneInfo.TryFindSystemTimeZoneById(tz, out var z)) zone = z;
         }
         catch { }
-        id = await JS.InvokeAsync<string?>("nullifyAuth.qrId");
-        await JS.InvokeVoidAsync("nullifyAuth.reloadOnHashChange");
+        // Without an id the page shows the no-request step, which is what an unreadable one deserves.
+        id = await JS.TryInvokeAsync<string?>("nullifyAuth.qrId", null);
+        await JS.TryInvokeVoidAsync("nullifyAuth.reloadOnHashChange");
         if (string.IsNullOrEmpty(id))
         {
             step = Step.NoRequest;

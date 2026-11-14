@@ -54,8 +54,11 @@ public sealed class PgpBrowser(IJSRuntime js) : IAsyncDisposable
     private const long MaxBytes = 256L * 1024 * 1024;
     private IJSObjectReference? _module;
 
-    private async Task<IJSObjectReference> Module() =>
-        _module ??= await js.InvokeAsync<IJSObjectReference>("import", "./js/pgp-bridge.js");
+    private async Task<IJSObjectReference> Module()
+    {
+        try { return _module ??= await js.InvokeAsync<IJSObjectReference>("import", "./js/pgp-bridge.js"); }
+        catch (JSException ex) { throw Wrap(ex); }
+    }
 
     private async Task<T> Call<T>(string fn, params object?[] args)
     {

@@ -617,10 +617,15 @@
         var content = new EditorContent("", "", false, []);
         if (editor != null)
         {
-            var data = await editor.InvokeAsync<IJSStreamReference>("content");
-            await using var stream = await data.OpenReadStreamAsync(MaxAttachmentBytes);
-            content = await System.Text.Json.JsonSerializer.DeserializeAsync<EditorContent>(stream,
-                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)) ?? content;
+            // Never fall back to an empty body: the caller reports the failure and nothing is sent or saved.
+            try
+            {
+                var data = await editor.InvokeAsync<IJSStreamReference>("content");
+                await using var stream = await data.OpenReadStreamAsync(MaxAttachmentBytes);
+                content = await System.Text.Json.JsonSerializer.DeserializeAsync<EditorContent>(stream,
+                    new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)) ?? content;
+            }
+            catch (JSException ex) { throw new InvalidOperationException("Couldn't read the message from the editor.", ex); }
         }
         // Photos deleted from the body are left out.
         var shown = content.Cids.ToHashSet();
@@ -659,7 +664,7 @@
             return;
         }
         if (!resumeSend && string.IsNullOrWhiteSpace(subject) &&
-            !await JS.InvokeAsync<bool>("nullifyApp.confirm", EncryptOn
+            !await JS.ConfirmAsync(EncryptOn
                 ? "Send this message without a subject? (Subjects are not encrypted.)"
                 : "Send this message without a subject?"))
             return;
@@ -733,17 +738,24 @@
     private async Task<bool> IsDirtyAsync() =>
         to.Length > 0 && State.ComposeMode is ComposeMode.New or ComposeMode.Forward
         || attachments.Count > 0 && State.ComposeMode != ComposeMode.Forward
-        || editor != null && await editor.InvokeAsync<bool>("isDirty");
+        || editor != null && await EditorDirtyAsync(editor);
+
+    // When the editor can't say, assume there is something to lose and ask.
+    private static async Task<bool> EditorDirtyAsync(IJSObjectReference editor)
+    {
+        try { return await editor.InvokeAsync<bool>("isDirty"); }
+        catch (Exception ex) when (BrowserJs.IsInteropFailure(ex)) { return true; }
+    }
 
     private async Task Discard()
     {
-        if (await IsDirtyAsync() && !await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard this message?")) return;
+        if (await IsDirtyAsync() && !await JS.ConfirmAsync("Discard this message?")) return;
         CloseNow();
     }
 
     private async Task Close()
     {
-        if (await IsDirtyAsync() && !await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard this message?")) return;
+        if (await IsDirtyAsync() && !await JS.ConfirmAsync("Discard this message?")) return;
         CloseNow();
     }
 
@@ -765,7 +777,7 @@
             from, to, cc, bcc, showCc, showBcc, subject, html, important, inReplyTo, references,
             attachments.ToList(), sign, encryptTouched, encryptChoice);
         var token = Handoff.Put(cred.Login, draft);
-        if (!await JS.InvokeAsync<bool>("nullifyApp.openCompose", token))
+        if (!await JS.TryInvokeAsync("nullifyApp.openCompose", false, token))
         {
             Handoff.Take(cred.Login, token);
             error = "Your browser blocked the new window — allow pop-ups for this site.";

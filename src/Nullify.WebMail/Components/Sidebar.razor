@@ -224,7 +224,6 @@
             loadError = ex.InnerException?.Message ?? ex.Message;
         }
         loading = false;
-        StateHasChanged();
     }
 
     private async Task SelectFolder(string name)
@@ -434,7 +433,7 @@
     {
         var label = MailFormat.FolderLeaf(f);
         var warning = f.TotalMessages > 0 ? $" and its {f.TotalMessages} message(s)" : "";
-        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Delete the folder \"{label}\"{warning}? This cannot be undone.")) return;
+        if (!await JS.ConfirmAsync($"Delete the folder \"{label}\"{warning}? This cannot be undone.")) return;
         try
         {
             await Api.DeleteFolderAsync(f.Name);

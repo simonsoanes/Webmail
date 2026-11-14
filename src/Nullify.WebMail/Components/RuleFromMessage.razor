@@ -121,7 +121,7 @@
             var result = await Api.AddSieveRuleAsync(sieveRule);
             if (result.Outcome == SieveRuleOutcome.NeedsCommentsDropped)
             {
-                if (!await JS.InvokeAsync<bool>("nullifyApp.confirm",
+                if (!await JS.ConfirmAsync(
                         $"Adding this rule rewrites your filter script \"{result.Script}\" and removes the comments in it. Continue?"))
                     return;
                 result = await Api.AddSieveRuleAsync(sieveRule, dropComments: true);

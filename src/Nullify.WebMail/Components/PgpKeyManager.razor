@@ -360,7 +360,7 @@ else
     private async Task Delete(PgpKeyRecord k)
     {
         menuFor = null;
-        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm",
+        if (!await JS.ConfirmAsync(
                 $"Delete the key for {k.UserId}?\n\nMessages encrypted to it can never be read again unless you have a backup.")) return;
         await Pgp.LockAsync(k.Fingerprint);
         await Store.DeleteAsync(k.Fingerprint);

@@ -194,17 +194,26 @@
 
     private async Task TakeLaunchedFiles()
     {
-        var names = await JS.InvokeAsync<string[]>("nullifyApp.launchedFiles");
-        if (names.Length == 0) return;
         var files = new List<(string Name, string Text)>(launchedFiles ?? []);
-        for (var i = 0; i < names.Length; i++)
+        try
         {
-            var data = await JS.InvokeAsync<IJSStreamReference>("nullifyApp.launchedFile", i);
-            await using var stream = await data.OpenReadStreamAsync(maxAllowedSize: 4 * 1024 * 1024);
-            using var reader = new StreamReader(stream);
-            files.Add((names[i], await reader.ReadToEndAsync()));
+            var names = await JS.InvokeAsync<string[]>("nullifyApp.launchedFiles");
+            if (names.Length == 0) return;
+            for (var i = 0; i < names.Length; i++)
+            {
+                var data = await JS.InvokeAsync<IJSStreamReference>("nullifyApp.launchedFile", i);
+                await using var stream = await data.OpenReadStreamAsync(maxAllowedSize: 4 * 1024 * 1024);
+                using var reader = new StreamReader(stream);
+                files.Add((names[i], await reader.ReadToEndAsync()));
+            }
+            await JS.InvokeVoidAsync("nullifyApp.clearLaunchedFiles");
         }
-        await JS.InvokeVoidAsync("nullifyApp.clearLaunchedFiles");
+        catch (JSDisconnectedException) { return; }
+        catch (Exception ex) when (BrowserJs.IsInteropFailure(ex))
+        {
+            State.ShowToast("Couldn't read the calendar files you opened.", isError: true);
+            return;
+        }
         launchedFiles = files;
         StateHasChanged();
     }
@@ -278,7 +287,7 @@
                 case "e" when targets.Count > 0: await Actions.ArchiveAsync(targets); State.CheckedUids.Clear(); break;
                 case "#" or "Delete" when targets.Count > 0: await Actions.DeleteAsync(targets); State.CheckedUids.Clear(); break;
             }
-            await JS.InvokeVoidAsync("nullifyApp.scrollIntoView", ".msg-row.active");
+            await JS.TryInvokeVoidAsync("nullifyApp.scrollIntoView", ".msg-row.active");
         });
     }
 

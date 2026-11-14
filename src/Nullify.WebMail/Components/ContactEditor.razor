@@ -267,13 +267,13 @@
 
     private async Task Cancel()
     {
-        if (Snapshot() != initial && !await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard your changes to this contact?")) return;
+        if (Snapshot() != initial && !await JS.ConfirmAsync("Discard your changes to this contact?")) return;
         await OnCancel.InvokeAsync();
     }
 
     private async Task Delete()
     {
-        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Delete {Contact?.FullName} from your address book? This can't be undone.")) return;
+        if (!await JS.ConfirmAsync($"Delete {Contact?.FullName} from your address book? This can't be undone.")) return;
         busy = true;
         try { await OnDelete.InvokeAsync(); }
         finally { busy = false; }

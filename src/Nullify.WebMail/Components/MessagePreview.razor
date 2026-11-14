@@ -339,7 +339,11 @@
         showSource = false;
         showDetails = false;
         moreOpen = false;
+        // Needed: OnStateChanged calls this outside any event handler, where nothing renders the
+        // cleared preview before the fetch. The analyzer only sees the Retry button's call.
+#pragma warning disable BL0012
         StateHasChanged();
+#pragma warning restore BL0012
         try
         {
             var loaded = await Api.GetMessageAsync(folder, uid.Value);

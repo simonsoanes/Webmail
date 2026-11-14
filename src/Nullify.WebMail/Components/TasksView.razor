@@ -509,7 +509,7 @@
 
     private async Task<bool> ConfirmDiscard() =>
         Snapshot() == initial || !(creating || selected != null)
-        || await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard your unsaved changes to this task?");
+        || await JS.ConfirmAsync("Discard your unsaved changes to this task?");
 
     private async Task Save()
     {

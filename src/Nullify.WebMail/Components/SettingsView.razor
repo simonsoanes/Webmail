@@ -648,7 +648,7 @@
 
     private async Task RemoveAlias(SenderIdentity alias)
     {
-        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Stop sending as {alias.Email}?")) return;
+        if (!await JS.ConfirmAsync($"Stop sending as {alias.Email}?")) return;
         await IdentityChange(() => Api.RemoveAliasAsync(alias.Email), $"Removed {alias.Email}");
     }
 
@@ -743,7 +743,7 @@
 
     private async Task ResetDav()
     {
-        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", "Remove your CalDAV settings and use the server defaults?")) return;
+        if (!await JS.ConfirmAsync("Remove your CalDAV settings and use the server defaults?")) return;
         davBusy = true;
         try
         {
@@ -787,7 +787,7 @@
 
     private async Task Install()
     {
-        var outcome = await JS.InvokeAsync<string>("nullifyApp.install.prompt");
+        var outcome = await JS.TryInvokeAsync<string?>("nullifyApp.install.prompt", null);
         await RefreshInstall();
         if (outcome == "accepted") State.ShowToast("Installed. Open it from your apps or desktop.");
     }
@@ -808,7 +808,7 @@
     public void Dispose()
     {
         if (selfRef == null) return;
-        _ = JS.InvokeVoidAsync("nullifyApp.install.watch", (object?)null).AsTask().ContinueWith(_ => { });
+        _ = JS.TryInvokeVoidAsync("nullifyApp.install.watch", (object?)null);
         selfRef.Dispose();
     }
 
@@ -835,14 +835,14 @@
 
     private async Task TestNotification()
     {
-        if (!await JS.InvokeAsync<bool>("nullifyApp.notifications.test"))
+        if (!await JS.TryInvokeAsync("nullifyApp.notifications.test", false))
             State.ShowToast("The notification couldn't be shown.", isError: true);
     }
 
     private async Task SetTheme(string value)
     {
         theme = value;
-        await JS.InvokeVoidAsync("nullifyApp.setTheme", value);
+        await JS.TryInvokeVoidAsync("nullifyApp.setTheme", value);
     }
 
     private async Task SavePrefs()
@@ -939,7 +939,7 @@
 
     private async Task DocsReset()
     {
-        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", "Remove your Documents server settings and use the defaults?")) return;
+        if (!await JS.ConfirmAsync("Remove your Documents server settings and use the defaults?")) return;
         docsBusy = true;
         try
         {
@@ -1007,7 +1007,7 @@
 
     private async Task RemoveDocServer(DavServerDto server)
     {
-        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Remove \"{server.Name}\" from Documents? Its files stay on the server.")) return;
+        if (!await JS.ConfirmAsync($"Remove \"{server.Name}\" from Documents? Its files stay on the server.")) return;
         docsBusy = true;
         try
         {

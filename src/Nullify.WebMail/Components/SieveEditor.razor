@@ -216,7 +216,7 @@
     private async Task DeleteScript()
     {
         if (selected == null) return;
-        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Delete the script \"{selected.Name}\"?")) return;
+        if (!await JS.ConfirmAsync($"Delete the script \"{selected.Name}\"?")) return;
         try
         {
             await Api.DeleteSieveScriptAsync(selected.Name);

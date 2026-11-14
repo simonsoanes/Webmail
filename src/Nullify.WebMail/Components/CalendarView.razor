@@ -768,10 +768,10 @@
                     State.ShowToast("This event repeats in a way that can't be changed here.", isError: true);
                     return;
                 }
-                if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", "This event repeats. Change every occurrence?")) return;
+                if (!await JS.ConfirmAsync("This event repeats. Change every occurrence?")) return;
             }
             var notify = ev.Organizer != null && ev.Attendees.Count > 0 &&
-                         await JS.InvokeAsync<bool>("nullifyApp.confirm", "Email the guests about the new time?");
+                         await JS.ConfirmAsync("Email the guests about the new time?");
 
             var edit = new EventEdit(ev.Summary == "(no title)" ? "" : ev.Summary, ev.Location, ev.Description, ev.AllDay, start, end, repeat);
             var (before, after) = await CalDav.SaveEventAsync(ev, edit, ev.CalendarId!, State.TimeZone);
@@ -1031,14 +1031,13 @@
         hidden.Remove(sub.Id);
         State.ShowToast($"Added {sub.Name}");
         await Load();
-        StateHasChanged();
     }
 
     private async Task Unsubscribe(CalendarInfo cal)
     {
         try
         {
-            if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Remove \"{cal.Name}\" from your calendars?")) return;
+            if (!await JS.ConfirmAsync($"Remove \"{cal.Name}\" from your calendars?")) return;
             await CalDav.UnsubscribeAsync(cal.Id);
             if (hidden.Remove(cal.Id)) await SaveHidden();
             State.ShowToast($"Removed {cal.Name}");

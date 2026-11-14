@@ -382,7 +382,7 @@
     private async Task OpenWindow(MouseEventArgs e, long uid)
     {
         if (e.ShiftKey || e.CtrlKey || e.MetaKey || State.SelectedFolder is not { } folder) return;
-        if (!await JS.InvokeAsync<bool>("nullifyApp.openMessage", folder, uid))
+        if (!await JS.TryInvokeAsync("nullifyApp.openMessage", false, folder, uid))
             State.ShowToast("Your browser blocked the new window — allow pop-ups for this site.", isError: true);
     }
 
@@ -430,7 +430,7 @@
     {
         CloseContext();
         if (State.SelectedFolder is not { } folder) return;
-        await JS.InvokeVoidAsync("nullifyApp.download",
+        await JS.TryInvokeVoidAsync("nullifyApp.download",
             $"api/mail/eml?folder={Uri.EscapeDataString(folder)}&uid={uid}");
     }
 

@@ -308,7 +308,7 @@
     }
 
     private async Task<bool> ConfirmDiscard() =>
-        !Dirty || await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard your unsaved changes to this note?");
+        !Dirty || await JS.ConfirmAsync("Discard your unsaved changes to this note?");
 
     private async Task OnEditorKey(KeyboardEventArgs e)
     {
@@ -459,7 +459,7 @@
 
     private async Task DeleteFromMenu(NoteItem note)
     {
-        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Delete \"{NoteFiles.DisplayTitle(note)}\"? This can't be undone.")) return;
+        if (!await JS.ConfirmAsync($"Delete \"{NoteFiles.DisplayTitle(note)}\"? This can't be undone.")) return;
         if (note.Href == selected?.Href && !creating) { await Delete(); return; }
         busy = true;
         try

@@ -178,7 +178,7 @@
     }
 
     private async Task Show(string kind, string tag, string title, string body, string id, bool onlyWhenAway) =>
-        await JS.InvokeAsync<bool>("nullifyApp.notifications.show", kind, tag, title, body, id, onlyWhenAway);
+        await JS.TryInvokeAsync("nullifyApp.notifications.show", false, kind, tag, title, body, id, onlyWhenAway);
 
     public void Dispose()
     {

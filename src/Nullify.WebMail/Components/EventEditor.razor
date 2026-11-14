@@ -430,7 +430,7 @@
 
     private async Task Cancel()
     {
-        if (Snapshot() != initial && !await JS.InvokeAsync<bool>("nullifyApp.confirm", "Discard your changes to this event?")) return;
+        if (Snapshot() != initial && !await JS.ConfirmAsync("Discard your changes to this event?")) return;
         await OnClose.InvokeAsync();
     }
 }

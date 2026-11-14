@@ -18,8 +18,10 @@ namespace Nullify.WebMail.Services;
 public sealed class UserSession(
     AuthService auth,
     AuthenticationStateProvider authState,
-    IDbContextFactory<AppDbContext> dbFactory)
+    IDbContextFactory<AppDbContext> dbFactory) : IDisposable
 {
+    private bool _watching;
+
     public CredentialInfo? Credential { get; private set; }
     public bool IsAdmin { get; private set; }
     public bool IsAuthenticated => Credential != null;
@@ -44,9 +46,7 @@ public sealed class UserSession(
     {
         if (Credential != null) return;
 
-        var user = auth.HasHttpContext
-            ? auth.CurrentUser
-            : (await authState.GetAuthenticationStateAsync()).User;
+        var user = auth.HasHttpContext ? auth.CurrentUser : await CircuitUserAsync();
         var cred = auth.GetCredential(user);
         if (cred == null) return;
 
@@ -60,6 +60,32 @@ public sealed class UserSession(
 
     /// <summary>The session was ended elsewhere (revoked from the phone, or timed out): stop using the credential.</summary>
     public void End() => Credential = null;
+
+    private async Task<System.Security.Claims.ClaimsPrincipal> CircuitUserAsync()
+    {
+        if (!_watching)
+        {
+            authState.AuthenticationStateChanged += OnAuthenticationStateChanged;
+            _watching = true;
+        }
+        return (await authState.GetAuthenticationStateAsync()).User;
+    }
+
+    // The circuit's user changed under it: drop the snapshot unless it is still the same login,
+    // so the next CaptureAsync reads the new state rather than keep using the old credential.
+    private async void OnAuthenticationStateChanged(Task<AuthenticationState> state)
+    {
+        try
+        {
+            if (auth.GetCredential((await state).User)?.Login != Credential?.Login) End();
+        }
+        catch { End(); }
+    }
+
+    public void Dispose()
+    {
+        if (_watching) authState.AuthenticationStateChanged -= OnAuthenticationStateChanged;
+    }
 
     private async Task ApplyAsync(CredentialInfo cred, CancellationToken ct)
     {

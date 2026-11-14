@@ -104,7 +104,7 @@
     private async Task Copy()
     {
         if (created == null) return;
-        var ok = await JS.InvokeAsync<bool>("nullifyApp.copyText", created.Key);
+        var ok = await JS.TryInvokeAsync("nullifyApp.copyText", false, created.Key);
         State.ShowToast(ok ? "Key copied" : "Couldn't copy it; select the key and copy it instead", isError: !ok);
     }
 

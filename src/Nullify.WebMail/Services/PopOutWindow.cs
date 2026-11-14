@@ -34,8 +34,9 @@ public static class PopOutWindow
     /// </summary>
     public static async Task<bool> InitBrowserAsync<T>(IJSRuntime js, AppState state, DotNetObjectReference<T> window) where T : class
     {
-        await js.InvokeVoidAsync("nullifyApp.windowKeys", window);
-        var tz = await js.InvokeAsync<string>("nullifyApp.timeZone");
+        // Without these the window still works: no send shortcut, and times in the server's zone.
+        await js.TryInvokeVoidAsync("nullifyApp.windowKeys", window);
+        var tz = await js.TryInvokeAsync<string?>("nullifyApp.timeZone", null);
         if (string.IsNullOrEmpty(tz) || !TimeZoneInfo.TryFindSystemTimeZoneById(tz, out var zone)) return false;
         state.TimeZone = zone;
         return true;

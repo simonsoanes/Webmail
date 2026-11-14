@@ -320,13 +320,13 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (firstRender) await JS.InvokeVoidAsync("nullifyApp.docsDrop", shell);
+        if (firstRender) await JS.TryInvokeVoidAsync("nullifyApp.docsDrop", shell);
         if (revealUploads)
         {
             revealUploads = false;
             var first = Sorted().FirstOrDefault(i => justUploaded.Contains(i.Name));
             if (first != null)
-                await JS.InvokeVoidAsync("nullifyApp.scrollIntoView", $".docs-table tr[data-name=\"{CssEscape(first.Name)}\"]");
+                await JS.TryInvokeVoidAsync("nullifyApp.scrollIntoView", $".docs-table tr[data-name=\"{CssEscape(first.Name)}\"]");
         }
         if (!focusName) return;
         focusName = false;
@@ -453,11 +453,11 @@
         await action();
     }
 
-    private Task Download(DavItem item) => JS.InvokeVoidAsync("nullifyApp.download", DownloadUrl(item)).AsTask();
+    private Task Download(DavItem item) => JS.TryInvokeVoidAsync("nullifyApp.download", DownloadUrl(item));
 
     private async Task CopyName(DavItem item)
     {
-        if (await JS.InvokeAsync<bool>("nullifyApp.copyText", item.Name)) State.ShowToast("Name copied");
+        if (await JS.TryInvokeAsync("nullifyApp.copyText", false, item.Name)) State.ShowToast("Name copied");
         else State.ShowToast("Couldn't copy to the clipboard", isError: true);
     }
 
@@ -531,7 +531,7 @@
     private async Task Delete(DavItem item)
     {
         var what = item.IsFolder ? $"the folder \"{item.Name}\" and everything in it" : $"\"{item.Name}\"";
-        if (!await JS.InvokeAsync<bool>("nullifyApp.confirm", $"Delete {what}? This can't be undone.")) return;
+        if (!await JS.ConfirmAsync($"Delete {what}? This can't be undone.")) return;
         try
         {
             await Dav.DeleteAsync(current?.Id, item);
@@ -557,7 +557,7 @@
         if (clashes.Count > 0)
         {
             var list = string.Join(", ", clashes.Take(3)) + (clashes.Count > 3 ? $" and {clashes.Count - 3} more" : "");
-            overwrite = await JS.InvokeAsync<bool>("nullifyApp.confirm", $"{list} already exist{(clashes.Count == 1 ? "s" : "")} here. Replace?");
+            overwrite = await JS.ConfirmAsync($"{list} already exist{(clashes.Count == 1 ? "s" : "")} here. Replace?");
         }
 
         uploading = true;
