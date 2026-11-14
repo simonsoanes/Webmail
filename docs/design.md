@@ -330,7 +330,7 @@ IDLE, it sends a Server‑Sent Events (SSE) notification to the Blazor client
 
 | Layer | Technology |
 |---|---|
-| Runtime | .NET 10 |
+| Runtime | .NET 11 |
 | Server | ASP.NET Core (Razor Pages host + API controllers) |
 | Frontend | Blazor WebAssembly (standalone) |
 | Database | SQLite via EF Core |

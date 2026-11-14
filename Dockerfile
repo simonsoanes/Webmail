@@ -4,7 +4,7 @@
 # CI gates: `docker build --target test .` runs the .NET test suite inside the SDK image, and
 # `docker build --target test-pgp .` runs the OpenPGP interop tests against GnuPG and OpenPGP.js.
 
-ARG DOTNET_VERSION=10.0
+ARG DOTNET_VERSION=11.0
 ARG NODE_VERSION=22
 
 # The publish output is portable IL (no app host), so it is built on the builder's own platform and only

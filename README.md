@@ -1,6 +1,6 @@
 # Nullify.WebMail
 
-A self-hosted **webmail client** for your existing IMAP/SMTP server, with calendar, contacts, files, server-side filters and **OpenPGP**. It is built on .NET 10 (Blazor Server) and SQLite (or PostgreSQL), and is designed to run in Docker on Linux behind a reverse proxy such as Caddy.
+A self-hosted **webmail client** for your existing IMAP/SMTP server, with calendar, contacts, files, server-side filters and **OpenPGP**. It is built on .NET 11 (Blazor Server) and SQLite (or PostgreSQL), and is designed to run in Docker on Linux behind a reverse proxy such as Caddy.
 
 - **Mail** over IMAP and SMTP: folders, search, flags, move and archive, attachments, rich-text compose (fonts, colours, lists, inline photos) that stays plain text when unformatted, paste and drag-and-drop attachments, important flag, reply and forward
 - **Safe message display**: HTML mail is rendered in a sandboxed iframe, with remote images blocked until you allow them
